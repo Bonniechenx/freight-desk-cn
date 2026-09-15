@@ -7,7 +7,7 @@ import {
   ReceiptText, Save, Search, Settings2, ShieldCheck, Sparkles, Store,
   Trash2, Upload, Weight,
 } from 'lucide-react';
-import readXlsxFile from 'read-excel-file/browser';
+import { readSheet } from 'read-excel-file/browser';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -172,7 +172,7 @@ function BatchCalculator({ pricing, surcharges, bindings }: { pricing: PricingCo
     if (!file) return;
     setLoading(true);
     try {
-      const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readXlsxFile(file);
+      const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
       const parsed = gridToShipments(grid);
       if (!parsed.length) throw new Error('没有识别到有效账单行');
       setRows(parsed); setFileName(file.name); setMessage(`已识别 ${parsed.length} 条账单，计算在当前浏览器完成`);
@@ -324,7 +324,7 @@ function parseCsv(text: string): (string | number | null)[][] {
   row.push(field); if (row.some((item) => item.trim())) rows.push(row); return rows;
 }
 
-function gridToShipments(grid: (string | number | boolean | Date | null)[][]): ShipmentInput[] {
+function gridToShipments(grid: unknown[][]): ShipmentInput[] {
   if (grid.length < 2) return [];
   const headers = grid[0].map((cell) => String(cell ?? '').trim().toLowerCase());
   const find = (patterns: RegExp[]) => headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
@@ -333,7 +333,7 @@ function gridToShipments(grid: (string | number | boolean | Date | null)[][]): S
   return grid.slice(1).map((cells, index) => ({ trackingNo: String(cells[track] ?? `ROW-${index + 2}`), destination: String(cells[destination] ?? ''), weight: Number(cells[weight]), store: store >= 0 ? String(cells[store] ?? '') : '', date: date >= 0 ? formatCellDate(cells[date]) : '' })).filter((row) => row.destination || Number.isFinite(row.weight));
 }
 
-function formatCellDate(value: string | number | boolean | Date | null) { if (value instanceof Date) return value.toISOString().slice(0, 10); return String(value ?? ''); }
+function formatCellDate(value: unknown) { if (value instanceof Date) return value.toISOString().slice(0, 10); return String(value ?? ''); }
 
 function downloadCsv(name: string, rows: (string | number)[][]) {
   const escaped = rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n');
