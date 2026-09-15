@@ -12,7 +12,7 @@
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev:pages
 ```
 
 生成 GitHub Pages 静态文件：
