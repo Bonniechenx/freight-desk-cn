@@ -35,6 +35,16 @@ const initialBindings: Binding[] = [
   { id: 'b2', store: '北辰专营店', customer: '北辰商贸', quote: '默认客户报价', prepaid: 1 },
   { id: 'b3', store: '云栈生活馆', customer: '云栈供应链', quote: '默认客户报价', prepaid: 2 },
 ];
+const quoteTemplateHeaders = [
+  '报价名称', '首重重量(kg)', '首重价格(元)', '续重单位(kg)', '续重价格(元)',
+  '最低收费(元)', '折扣系数', '重量取整', '附加费规则', '适用地区',
+  '附加费方式', '附加费金额', '是否启用',
+];
+const quoteTemplateRows: (string | number)[][] = [
+  ['华东电商报价', 1, 2.8, 0.5, 0.6, 2.8, 1, '向上取整', '偏远地区加收', '新疆,西藏', '按票', 12, '是'],
+  ['华东电商报价', 1, 2.8, 0.5, 0.6, 2.8, 1, '向上取整', '京沪加收', '北京,上海', '按票', 1, '是'],
+];
+const bindingTemplateHeaders = ['客户名称', '店铺名称', '报价名称', '预付面单费(元)'];
 
 export default function Home() {
   const [view, setView] = useState<View>('single');
@@ -207,12 +217,42 @@ function BatchCalculator({ pricing, surcharges, bindings }: { pricing: PricingCo
 }
 
 function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfig }: { pricing: PricingConfig; setPricing: (value: PricingConfig) => void; surcharges: SurchargeRule[]; setSurcharges: (value: SurchargeRule[]) => void; saveConfig: () => void }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importMessage, setImportMessage] = useState('');
+  const [importError, setImportError] = useState(false);
+  const [importing, setImporting] = useState(false);
   const updateNumber = (key: keyof PricingConfig, value: string) => setPricing({ ...pricing, [key]: Number(value) || 0 });
   const updateRule = (id: string, patch: Partial<SurchargeRule>) => setSurcharges(surcharges.map((item) => item.id === id ? { ...item, ...patch } : item));
   const addRule = () => setSurcharges([...surcharges, { id: crypto.randomUUID(), name: '新附加费', destinations: ['海南'], mode: 'ticket', amount: 1, enabled: true }]);
+  const downloadTemplate = () => downloadCsv('报价导入固定模板.csv', [quoteTemplateHeaders, ...quoteTemplateRows]);
+  const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setImportMessage('');
+    try {
+      const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
+      const imported = parseQuoteTemplate(grid);
+      setPricing(imported.pricing);
+      setSurcharges(imported.surcharges);
+      setImportError(false);
+      setImportMessage(`已导入“${imported.pricing.quoteName}”和 ${imported.surcharges.length} 条附加费规则，请检查后点击保存报价`);
+    } catch (error) {
+      setImportError(true);
+      setImportMessage(error instanceof Error ? error.message : '报价模板解析失败');
+    } finally {
+      setImporting(false);
+      event.target.value = '';
+    }
+  };
   return (
     <>
-      <PageIntro eyebrow="草稿自动保留在当前浏览器" title="把报价规则变成可复用的计费模板" description="首版支持首续重、重量取整、折扣、最低收费和地区附加费。" action={<Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button>} />
+      <PageIntro eyebrow="草稿自动保留在当前浏览器" title="把报价规则变成可复用的计费模板" description="支持固定模板导入、首续重、重量取整、折扣、最低收费和地区附加费。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载固定模板</Button><Button variant="outline" onClick={() => fileRef.current?.click()} className="h-10"><Upload />{importing ? '正在导入' : '导入报价'}</Button><Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button></div>} />
+      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
+        <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
+        <div><p className="font-semibold">固定模板说明</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。第一行必须保留模板表头；每一行代表一条附加费规则，基础报价字段请按模板重复填写。</p></div>
+      </div>
+      {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       <div className="grid gap-5 xl:grid-cols-[1fr_1.2fr]">
         <Panel title="基础费用" description="执行顺序：重量取整 → 首续重 → 折扣 → 最低收费">
           <div className="grid gap-4 p-5 sm:grid-cols-2">
@@ -245,15 +285,47 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfi
 }
 
 function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[]; setBindings: (value: Binding[]) => void; pricing: PricingConfig }) {
+  const fileRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState({ store: '', customer: '', prepaid: '0' });
+  const [importMessage, setImportMessage] = useState('');
+  const [importError, setImportError] = useState(false);
+  const [importing, setImporting] = useState(false);
   const add = () => {
     if (!draft.store.trim() || !draft.customer.trim()) return;
     setBindings([...bindings, { id: crypto.randomUUID(), store: draft.store.trim(), customer: draft.customer.trim(), quote: pricing.quoteName, prepaid: Number(draft.prepaid) || 0 }]);
     setDraft({ store: '', customer: '', prepaid: '0' });
   };
+  const downloadTemplate = () => {
+    const rows = bindings.length ? bindings.map((item) => [item.customer, item.store, item.quote, item.prepaid]) : [['示例客户', '示例旗舰店', pricing.quoteName, 0]];
+    downloadCsv('客户店铺结算关系固定模板.csv', [bindingTemplateHeaders, ...rows]);
+  };
+  const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setImportMessage('');
+    try {
+      const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
+      const imported = parseBindingTemplate(grid, pricing.quoteName);
+      setBindings(imported);
+      setImportError(false);
+      setImportMessage(`已导入 ${imported.length} 条结算关系，点击页面右上角“保存”后保留在本机`);
+    } catch (error) {
+      setImportError(true);
+      setImportMessage(error instanceof Error ? error.message : '结算关系模板解析失败');
+    } finally {
+      setImporting(false);
+      event.target.value = '';
+    }
+  };
   return (
     <>
-      <PageIntro eyebrow="映射决定每一票使用哪份报价" title="一个客户可以绑定多个店铺" description="店铺名称用于总表自动匹配；预付面单费在计算完成后从应收中抵扣。" />
+      <PageIntro eyebrow="映射决定每一票使用哪份报价" title="一个客户可以绑定多个店铺" description="店铺名称用于总表自动匹配；预付面单费在计算完成后从应收中抵扣。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载关系模板</Button><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{importing ? '正在导入' : '导入结算关系'}</Button></div>} />
+      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
+        <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
+        <div><p className="font-semibold">结算关系模板说明</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。固定列为客户名称、店铺名称、报价名称、预付面单费；同一店铺只能出现一次，报价名称需与当前报价“{pricing.quoteName}”一致。</p></div>
+      </div>
+      {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       <section className="grid gap-5 xl:grid-cols-[360px_1fr]">
         <Panel title="新增绑定" description="数据仅保存在当前浏览器">
           <div className="space-y-4 p-5">
@@ -331,6 +403,92 @@ function gridToShipments(grid: unknown[][]): ShipmentInput[] {
   const track = find([/运单/, /快递单/, /tracking/]); const destination = find([/目的地/, /收件.*省/, /省份/, /destination/]); const weight = find([/结算重量/, /计费重量/, /^重量$/, /weight/]); const store = find([/店铺/, /客户/, /结算对象/, /store/]); const date = find([/日期/, /揽收时间/, /date/]);
   if (destination < 0 || weight < 0) throw new Error('未识别到目的地或重量列，请将表头命名为“目的地”和“重量”');
   return grid.slice(1).map((cells, index) => ({ trackingNo: String(cells[track] ?? `ROW-${index + 2}`), destination: String(cells[destination] ?? ''), weight: Number(cells[weight]), store: store >= 0 ? String(cells[store] ?? '') : '', date: date >= 0 ? formatCellDate(cells[date]) : '' })).filter((row) => row.destination || Number.isFinite(row.weight));
+}
+
+function parseQuoteTemplate(grid: unknown[][]): { pricing: PricingConfig; surcharges: SurchargeRule[] } {
+  if (grid.length < 2) throw new Error('模板中没有可导入的报价数据');
+  const normalizeHeader = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[（）\s]/g, (char) => char === '（' ? '(' : char === '）' ? ')' : '');
+  const headers = grid[0].map(normalizeHeader);
+  const indexOf = (name: string) => headers.indexOf(normalizeHeader(name));
+  const missing = quoteTemplateHeaders.filter((name) => indexOf(name) < 0);
+  if (missing.length) throw new Error(`模板表头不完整，缺少：${missing.join('、')}`);
+  const rows = grid.slice(1).filter((row) => row.some((cell) => String(cell ?? '').trim()));
+  if (!rows.length) throw new Error('模板中没有可导入的报价数据');
+  const first = rows[0];
+  const textAt = (row: unknown[], name: string) => String(row[indexOf(name)] ?? '').trim();
+  const numberAt = (row: unknown[], name: string, rowNumber: number) => {
+    const value = Number(row[indexOf(name)]);
+    if (!Number.isFinite(value)) throw new Error(`第 ${rowNumber} 行“${name}”必须是数字`);
+    return value;
+  };
+  const quoteName = textAt(first, '报价名称');
+  if (!quoteName) throw new Error('第 2 行“报价名称”不能为空');
+  const roundingValue = textAt(first, '重量取整');
+  const roundingMap: Record<string, PricingConfig['rounding']> = { '向上取整': 'ceil', '四舍五入': 'round', '向下取整': 'floor', '不取整': 'none', ceil: 'ceil', round: 'round', floor: 'floor', none: 'none' };
+  const rounding = roundingMap[roundingValue.toLowerCase()] ?? roundingMap[roundingValue];
+  if (!rounding) throw new Error('“重量取整”仅支持：向上取整、四舍五入、向下取整、不取整');
+  const pricing: PricingConfig = {
+    quoteName,
+    firstWeight: numberAt(first, '首重重量(kg)', 2),
+    firstPrice: numberAt(first, '首重价格(元)', 2),
+    continuedStep: numberAt(first, '续重单位(kg)', 2),
+    continuedPrice: numberAt(first, '续重价格(元)', 2),
+    minimumCharge: numberAt(first, '最低收费(元)', 2),
+    discount: numberAt(first, '折扣系数', 2),
+    rounding,
+  };
+  if (pricing.firstWeight <= 0 || pricing.continuedStep <= 0) throw new Error('首重重量和续重单位必须大于 0');
+  if ([pricing.firstPrice, pricing.continuedPrice, pricing.minimumCharge, pricing.discount].some((value) => value < 0)) throw new Error('价格、最低收费和折扣系数不能小于 0');
+  const surcharges = rows.map((row, index) => {
+    const rowNumber = index + 2;
+    const name = textAt(row, '附加费规则');
+    const destinationsText = textAt(row, '适用地区');
+    if (!name && !destinationsText) return null;
+    if (!name || !destinationsText) throw new Error(`第 ${rowNumber} 行附加费规则名称和适用地区必须同时填写`);
+    const modeValue = textAt(row, '附加费方式').toLowerCase();
+    const modeMap: Record<string, SurchargeRule['mode']> = { '按票': 'ticket', '按重量': 'weight', ticket: 'ticket', weight: 'weight' };
+    const mode = modeMap[modeValue];
+    if (!mode) throw new Error(`第 ${rowNumber} 行“附加费方式”仅支持按票或按重量`);
+    const enabledValue = textAt(row, '是否启用').toLowerCase();
+    if (!['是', '否', 'true', 'false', '1', '0'].includes(enabledValue)) throw new Error(`第 ${rowNumber} 行“是否启用”仅支持是或否`);
+    const amount = numberAt(row, '附加费金额', rowNumber);
+    if (amount < 0) throw new Error(`第 ${rowNumber} 行附加费金额不能小于 0`);
+    return {
+      id: crypto.randomUUID(),
+      name,
+      destinations: destinationsText.split(/[,，、;；\s]+/).filter(Boolean),
+      mode,
+      amount,
+      enabled: ['是', 'true', '1'].includes(enabledValue),
+    } satisfies SurchargeRule;
+  }).filter((rule): rule is SurchargeRule => rule !== null);
+  return { pricing, surcharges };
+}
+
+function parseBindingTemplate(grid: unknown[][], activeQuote: string): Binding[] {
+  if (grid.length < 2) throw new Error('模板中没有可导入的结算关系');
+  const normalizeHeader = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[（）\s]/g, (char) => char === '（' ? '(' : char === '）' ? ')' : '');
+  const headers = grid[0].map(normalizeHeader);
+  const indexOf = (name: string) => headers.indexOf(normalizeHeader(name));
+  const missing = bindingTemplateHeaders.filter((name) => indexOf(name) < 0);
+  if (missing.length) throw new Error(`模板表头不完整，缺少：${missing.join('、')}`);
+  const rows = grid.slice(1).filter((row) => row.some((cell) => String(cell ?? '').trim()));
+  if (!rows.length) throw new Error('模板中没有可导入的结算关系');
+  const stores = new Set<string>();
+  return rows.map((row, index) => {
+    const rowNumber = index + 2;
+    const textAt = (name: string) => String(row[indexOf(name)] ?? '').trim();
+    const customer = textAt('客户名称');
+    const store = textAt('店铺名称');
+    const quote = textAt('报价名称');
+    if (!customer || !store || !quote) throw new Error(`第 ${rowNumber} 行客户名称、店铺名称和报价名称均不能为空`);
+    if (quote !== activeQuote) throw new Error(`第 ${rowNumber} 行报价名称必须与当前报价“${activeQuote}”一致`);
+    if (stores.has(store)) throw new Error(`第 ${rowNumber} 行店铺“${store}”重复，同一店铺只能绑定一次`);
+    stores.add(store);
+    const prepaid = Number(row[indexOf('预付面单费(元)')]);
+    if (!Number.isFinite(prepaid) || prepaid < 0) throw new Error(`第 ${rowNumber} 行预付面单费必须是大于或等于 0 的数字`);
+    return { id: crypto.randomUUID(), customer, store, quote, prepaid };
+  });
 }
 
 function formatCellDate(value: unknown) { if (value instanceof Date) return value.toISOString().slice(0, 10); return String(value ?? ''); }
