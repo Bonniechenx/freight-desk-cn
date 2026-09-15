@@ -4,10 +4,10 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight, Boxes, Calculator, CheckCircle2, ChevronRight, CircleAlert,
   Download, FileSpreadsheet, LayoutDashboard, MapPin, PackageCheck, Plus,
-  ReceiptText, Save, Search, Settings2, ShieldCheck, Sparkles, Store,
+  ReceiptText, Save, Search, ShieldCheck, Store,
   Trash2, Upload, Weight,
 } from 'lucide-react';
-import { readSheet } from 'read-excel-file/browser';
+import readXlsxFile, { readSheet } from 'read-excel-file/browser';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,11 +18,13 @@ import {
   calculateFreight, defaultPricing, defaultSurcharges, FeeResult,
   PricingConfig, ShipmentInput, SurchargeRule,
 } from '@/lib/freight';
+import {
+  calculateWorkbookFreight, ImportedWorkbookQuote, parseWorkbookQuote, WorkbookSheet,
+} from '@/lib/quote-workbook';
 
 type View = 'single' | 'batch' | 'quotes' | 'bindings';
 type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number };
 
-const provinces = ['广东省', '浙江省', '江苏省', '北京市', '上海市', '山东省', '四川省', '新疆', '西藏'];
 const sampleShipments: ShipmentInput[] = [
   { trackingNo: 'YT20260915001', destination: '广东省深圳市', weight: 0.86, store: '森屿旗舰店', date: '2026-09-15' },
   { trackingNo: 'YT20260915002', destination: '浙江省杭州市', weight: 2.31, store: '森屿旗舰店', date: '2026-09-15' },
@@ -35,15 +37,6 @@ const initialBindings: Binding[] = [
   { id: 'b2', store: '北辰专营店', customer: '北辰商贸', quote: '默认客户报价', prepaid: 1 },
   { id: 'b3', store: '云栈生活馆', customer: '云栈供应链', quote: '默认客户报价', prepaid: 2 },
 ];
-const quoteTemplateHeaders = [
-  '报价名称', '首重重量(kg)', '首重价格(元)', '续重单位(kg)', '续重价格(元)',
-  '最低收费(元)', '折扣系数', '重量取整', '附加费规则', '适用地区',
-  '附加费方式', '附加费金额', '是否启用',
-];
-const quoteTemplateRows: (string | number)[][] = [
-  ['华东电商报价', 1, 2.8, 0.5, 0.6, 2.8, 1, '向上取整', '偏远地区加收', '新疆,西藏', '按票', 12, '是'],
-  ['华东电商报价', 1, 2.8, 0.5, 0.6, 2.8, 1, '向上取整', '京沪加收', '北京,上海', '按票', 1, '是'],
-];
 const bindingTemplateHeaders = ['客户名称', '店铺名称', '报价名称', '预付面单费(元)'];
 
 export default function Home() {
@@ -51,6 +44,7 @@ export default function Home() {
   const [pricing, setPricing] = useState<PricingConfig>(defaultPricing);
   const [surcharges, setSurcharges] = useState<SurchargeRule[]>(defaultSurcharges);
   const [bindings, setBindings] = useState<Binding[]>(initialBindings);
+  const [workbookQuote, setWorkbookQuote] = useState<ImportedWorkbookQuote | null>(null);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -61,11 +55,12 @@ export default function Home() {
       if (parsed.pricing) setPricing(parsed.pricing);
       if (parsed.surcharges) setSurcharges(parsed.surcharges);
       if (parsed.bindings) setBindings(parsed.bindings);
+      if (parsed.workbookQuote) setWorkbookQuote(parsed.workbookQuote);
     } catch { /* ignore invalid local draft */ }
   }, []);
 
   const saveConfig = () => {
-    window.localStorage.setItem('freight-desk-config', JSON.stringify({ pricing, surcharges, bindings }));
+    window.localStorage.setItem('freight-desk-config', JSON.stringify({ pricing, surcharges, bindings, workbookQuote }));
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1600);
   };
@@ -78,10 +73,10 @@ export default function Home() {
           <Header view={view} saved={saved} saveConfig={saveConfig} />
           <MobileNav view={view} setView={setView} />
           <div className="mx-auto max-w-[1480px] p-4 md:p-8">
-            {view === 'single' && <SingleCalculator pricing={pricing} surcharges={surcharges} bindings={bindings} goBatch={() => setView('batch')} />}
-            {view === 'batch' && <BatchCalculator pricing={pricing} surcharges={surcharges} bindings={bindings} />}
-            {view === 'quotes' && <QuoteEditor pricing={pricing} setPricing={setPricing} surcharges={surcharges} setSurcharges={setSurcharges} saveConfig={saveConfig} />}
-            {view === 'bindings' && <BindingsEditor bindings={bindings} setBindings={setBindings} pricing={pricing} />}
+            {view === 'single' && <SingleCalculator pricing={pricing} surcharges={surcharges} workbookQuote={workbookQuote} bindings={bindings} goBatch={() => setView('batch')} />}
+            {view === 'batch' && <BatchCalculator pricing={pricing} surcharges={surcharges} workbookQuote={workbookQuote} bindings={bindings} />}
+            {view === 'quotes' && <QuoteEditor pricing={pricing} setPricing={setPricing} surcharges={surcharges} setSurcharges={setSurcharges} workbookQuote={workbookQuote} setWorkbookQuote={setWorkbookQuote} saveConfig={saveConfig} />}
+            {view === 'bindings' && <BindingsEditor bindings={bindings} setBindings={setBindings} quoteName={workbookQuote?.quoteName ?? pricing.quoteName} />}
           </div>
         </main>
       </div>
@@ -134,35 +129,39 @@ function MobileNav({ view, setView }: { view: View; setView: (view: View) => voi
   return <div className="flex gap-2 overflow-x-auto border-b bg-white px-4 py-3 lg:hidden">{items.map(([id, label]) => <button key={id} onClick={() => setView(id)} className={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium ${view === id ? 'bg-[#0b213b] text-white' : 'bg-slate-100 text-slate-600'}`}>{label}</button>)}</div>;
 }
 
-function SingleCalculator({ pricing, surcharges, bindings, goBatch }: { pricing: PricingConfig; surcharges: SurchargeRule[]; bindings: Binding[]; goBatch: () => void }) {
-  const [province, setProvince] = useState('广东省');
+function SingleCalculator({ pricing, surcharges, workbookQuote, bindings, goBatch }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuote: ImportedWorkbookQuote | null; bindings: Binding[]; goBatch: () => void }) {
+  const [destination, setDestination] = useState('广东省深圳市');
   const [weight, setWeight] = useState('3.26');
   const [store, setStore] = useState(bindings[0]?.store ?? '');
   const [date, setDate] = useState('2026-09-15');
   const binding = bindings.find((item) => item.store === store);
-  const result = useMemo(() => calculateFreight({ trackingNo: '单票试算', destination: province, weight: Number(weight), store, date }, pricing, surcharges, binding?.prepaid ?? 0), [province, weight, store, date, pricing, surcharges, binding]);
+  const activeQuoteName = workbookQuote?.quoteName ?? pricing.quoteName;
+  const result = useMemo(() => {
+    const input = { trackingNo: '单票试算', destination, weight: Number(weight), store, date };
+    return workbookQuote ? calculateWorkbookFreight(input, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(input, pricing, surcharges, binding?.prepaid ?? 0);
+  }, [destination, weight, store, date, pricing, surcharges, workbookQuote, binding]);
 
   return (
     <>
-      <PageIntro eyebrow={`${pricing.quoteName} · 当前生效`} title="输入目的地与重量，立即解释价格" description="系统依次完成地区匹配、重量取整、首续重计算、附加费与面单抵扣。" action={<Button onClick={goBatch} className="h-10 bg-[#0d7f75] px-4 text-white hover:bg-[#0a6d65]">进入批量核算 <ChevronRight /></Button>} />
+      <PageIntro eyebrow={`${activeQuoteName} · 当前生效`} title="输入目的地与重量，立即解释价格" description="系统依次匹配发货日期、目的地、公斤段、续重模式、加收费与面单抵扣。" action={<Button onClick={goBatch} className="h-10 bg-[#0d7f75] px-4 text-white hover:bg-[#0a6d65]">进入批量核算 <ChevronRight /></Button>} />
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,.75fr)]">
-        <Panel title="计费条件" description={`首重 ${pricing.firstWeight}kg / ¥${pricing.firstPrice}，续重 ${pricing.continuedStep}kg / ¥${pricing.continuedPrice}`}>
+        <Panel title="计费条件" description={workbookQuote ? `${workbookQuote.periods.length || 1} 个生效期，${workbookQuote.bandLabels.length} 个表头公斤段` : `首重 ${pricing.firstWeight}kg / ¥${pricing.firstPrice}，续重 ${pricing.continuedStep}kg / ¥${pricing.continuedPrice}`}>
           <div className="grid gap-5 p-5 md:grid-cols-2 md:p-6">
-            <Field label="目的地" icon={MapPin}><NativeSelect value={province} onChange={(event) => setProvince(event.target.value)} className="h-11 bg-white">{provinces.map((item) => <NativeSelectOption key={item}>{item}</NativeSelectOption>)}</NativeSelect></Field>
+            <Field label="目的地（省 / 市）" icon={MapPin}><Input value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="例如：广东省深圳市" className="h-11 bg-white" /></Field>
             <Field label="实际重量" icon={Weight}><InputWithUnit value={weight} setValue={setWeight} unit="kg" /></Field>
             <Field label="客户 / 店铺" icon={Store}><NativeSelect value={store} onChange={(event) => setStore(event.target.value)} className="h-11 bg-white">{bindings.map((item) => <NativeSelectOption key={item.id}>{item.store}</NativeSelectOption>)}</NativeSelect></Field>
             <Field label="发货日期" icon={FileSpreadsheet}><Input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-11 bg-white" /></Field>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-slate-50/70 px-5 py-4 text-xs text-muted-foreground md:px-6"><span>计费重量按 {pricing.continuedStep}kg {roundingText(pricing.rounding)}</span><span className="font-mono">报价 · {pricing.quoteName}</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-slate-50/70 px-5 py-4 text-xs text-muted-foreground md:px-6"><span>{workbookQuote ? `按报价表头自动识别阶梯价与续重方式` : `计费重量按 ${pricing.continuedStep}kg ${roundingText(pricing.rounding)}`}</span><span className="font-mono">报价 · {activeQuoteName}</span></div>
         </Panel>
         <ResultCard result={result} />
       </div>
-      <section className="mt-5 grid gap-4 md:grid-cols-3"><Metric label="示例账单" value="5" unit="票" trend="可直接试用" /><Metric label="附加费规则" value={String(surcharges.filter((item) => item.enabled).length)} unit="条" trend="已启用" /><Metric label="店铺绑定" value={String(bindings.length)} unit="个" trend="本机保存" /></section>
+      <section className="mt-5 grid gap-4 md:grid-cols-3"><Metric label="示例账单" value="5" unit="票" trend="可直接试用" /><Metric label="加收费规则" value={String(workbookQuote ? workbookQuote.extraRules.length : surcharges.filter((item) => item.enabled).length)} unit="条" trend={workbookQuote ? '来自独立 Sheet' : '已启用'} /><Metric label="店铺绑定" value={String(bindings.length)} unit="个" trend="本机保存" /></section>
     </>
   );
 }
 
-function BatchCalculator({ pricing, surcharges, bindings }: { pricing: PricingConfig; surcharges: SurchargeRule[]; bindings: Binding[] }) {
+function BatchCalculator({ pricing, surcharges, workbookQuote, bindings }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuote: ImportedWorkbookQuote | null; bindings: Binding[] }) {
   const [rows, setRows] = useState<ShipmentInput[]>(sampleShipments);
   const [fileName, setFileName] = useState('示例账单.xlsx');
   const [search, setSearch] = useState('');
@@ -171,8 +170,8 @@ function BatchCalculator({ pricing, surcharges, bindings }: { pricing: PricingCo
   const fileRef = useRef<HTMLInputElement>(null);
   const results = useMemo(() => rows.map((row) => {
     const binding = bindings.find((item) => item.store === row.store);
-    return calculateFreight(row, pricing, surcharges, binding?.prepaid ?? 0);
-  }), [rows, pricing, surcharges, bindings]);
+    return workbookQuote ? calculateWorkbookFreight(row, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(row, pricing, surcharges, binding?.prepaid ?? 0);
+  }), [rows, pricing, surcharges, workbookQuote, bindings]);
   const filtered = results.filter((row) => [row.trackingNo, row.destination, row.store].some((value) => String(value ?? '').toLowerCase().includes(search.toLowerCase())));
   const total = results.reduce((sum, row) => sum + row.total, 0);
   const errors = results.filter((row) => row.status === 'error').length;
@@ -216,7 +215,7 @@ function BatchCalculator({ pricing, surcharges, bindings }: { pricing: PricingCo
   );
 }
 
-function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfig }: { pricing: PricingConfig; setPricing: (value: PricingConfig) => void; surcharges: SurchargeRule[]; setSurcharges: (value: SurchargeRule[]) => void; saveConfig: () => void }) {
+function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQuote, setWorkbookQuote, saveConfig }: { pricing: PricingConfig; setPricing: (value: PricingConfig) => void; surcharges: SurchargeRule[]; setSurcharges: (value: SurchargeRule[]) => void; workbookQuote: ImportedWorkbookQuote | null; setWorkbookQuote: (value: ImportedWorkbookQuote | null) => void; saveConfig: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState(false);
@@ -224,22 +223,20 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfi
   const updateNumber = (key: keyof PricingConfig, value: string) => setPricing({ ...pricing, [key]: Number(value) || 0 });
   const updateRule = (id: string, patch: Partial<SurchargeRule>) => setSurcharges(surcharges.map((item) => item.id === id ? { ...item, ...patch } : item));
   const addRule = () => setSurcharges([...surcharges, { id: crypto.randomUUID(), name: '新附加费', destinations: ['海南'], mode: 'ticket', amount: 1, enabled: true }]);
-  const downloadTemplate = () => downloadCsv('报价导入固定模板.csv', [quoteTemplateHeaders, ...quoteTemplateRows]);
   const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     setImporting(true);
     setImportMessage('');
     try {
-      const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
-      const imported = parseQuoteTemplate(grid);
-      setPricing(imported.pricing);
-      setSurcharges(imported.surcharges);
+      const sheets = await readXlsxFile(file);
+      const imported = parseWorkbookQuote(file.name, sheets as WorkbookSheet[]);
+      setWorkbookQuote(imported);
       setImportError(false);
-      setImportMessage(`已导入“${imported.pricing.quoteName}”和 ${imported.surcharges.length} 条附加费规则，请检查后点击保存报价`);
+      setImportMessage(`已识别“${imported.quoteName}”：${imported.baseRules.length} 条基础费用、${imported.extraRules.length} 条加收费，请检查后点击保存报价`);
     } catch (error) {
       setImportError(true);
-      setImportMessage(error instanceof Error ? error.message : '报价模板解析失败');
+      setImportMessage(error instanceof Error ? error.message : '运费宝报价解析失败');
     } finally {
       setImporting(false);
       event.target.value = '';
@@ -247,12 +244,15 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfi
   };
   return (
     <>
-      <PageIntro eyebrow="草稿自动保留在当前浏览器" title="把报价规则变成可复用的计费模板" description="支持固定模板导入、首续重、重量取整、折扣、最低收费和地区附加费。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载固定模板</Button><Button variant="outline" onClick={() => fileRef.current?.click()} className="h-10"><Upload />{importing ? '正在导入' : '导入报价'}</Button><Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button></div>} />
-      <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
-        <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
-        <div><p className="font-semibold">固定模板说明</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。第一行必须保留模板表头；每一行代表一条附加费规则，基础报价字段请按模板重复填写。</p></div>
-      </div>
+      <PageIntro eyebrow="按工作表和表头自动识别" title="直接导入现有的运费宝报价" description="保留基础费用、加收费用和全局设置等独立 Sheet；公斤段、阶梯价与首续重模式由表头决定。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx" onChange={importTemplate} /><Button variant="outline" onClick={() => fileRef.current?.click()} className="h-10"><Upload />{importing ? '正在识别' : '导入运费宝报价'}</Button><Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button></div>} />
+      {workbookQuote ? <section className="mb-5 overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]">
+        <div className="flex flex-col gap-3 border-b border-emerald-100 bg-emerald-50/70 p-5 md:flex-row md:items-center md:justify-between"><div><div className="flex items-center gap-2 text-sm font-semibold text-emerald-800"><CheckCircle2 className="size-4" />多 Sheet 报价已启用</div><h3 className="mt-2 text-lg font-semibold">{workbookQuote.quoteName}</h3><p className="mt-1 text-xs text-muted-foreground">来源：{workbookQuote.sourceFile}</p></div><Button variant="outline" onClick={() => setWorkbookQuote(null)}>切换为手工报价</Button></div>
+        <div className="grid gap-4 p-5 md:grid-cols-3"><Metric label="基础费用规则" value={String(workbookQuote.baseRules.length)} unit="条" trend={`${workbookQuote.periods.length || 1} 个生效期`} /><Metric label="表头公斤段" value={String(workbookQuote.bandLabels.length)} unit="个" trend={workbookQuote.bandLabels.join(' / ')} /><Metric label="加收费规则" value={String(workbookQuote.extraRules.length)} unit="条" trend="独立 Sheet" /></div>
+        <div className="grid gap-4 border-t p-5 lg:grid-cols-2"><div><p className="text-xs font-semibold text-slate-600">已识别工作表</p><div className="mt-2 flex flex-wrap gap-2">{workbookQuote.detectedSheets.map((name) => <span key={name} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{name}</span>)}</div></div><div><p className="text-xs font-semibold text-slate-600">全局设置</p><p className="mt-2 text-xs leading-5 text-muted-foreground">双重量：{workbookQuote.globalSettings.doubleWeight ? '开启' : '关闭'}；仅续重取整：{workbookQuote.globalSettings.roundContinuedOnly ? '开启' : '关闭'}；合计金额：{workbookQuote.globalSettings.totalRounding}</p></div></div>
+        {workbookQuote.warnings.length > 0 && <div className="border-t border-amber-100 bg-amber-50 px-5 py-4 text-xs leading-5 text-amber-800">{workbookQuote.warnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}
+      </section> : <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900"><FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" /><div><p className="font-semibold">无需转换模板</p><p className="mt-1 text-xs leading-5 text-sky-800">直接选择现有 XLSX 报价文件。系统会优先读取“基础费用”，并分别读取“加收费用”和“全局设置”。</p></div></div>}
       {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
+      {!workbookQuote && <><div className="mb-3"><h3 className="font-semibold">手工报价</h3><p className="mt-1 text-xs text-muted-foreground">没有现成运费宝文件时，可用这组简化规则试算。</p></div>
       <div className="grid gap-5 xl:grid-cols-[1fr_1.2fr]">
         <Panel title="基础费用" description="执行顺序：重量取整 → 首续重 → 折扣 → 最低收费">
           <div className="grid gap-4 p-5 sm:grid-cols-2">
@@ -279,12 +279,12 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, saveConfi
           </div>
           <div className="border-t p-4"><Button variant="outline" onClick={addRule}><Plus />添加附加费</Button></div>
         </Panel>
-      </div>
+      </div></>}
     </>
   );
 }
 
-function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[]; setBindings: (value: Binding[]) => void; pricing: PricingConfig }) {
+function BindingsEditor({ bindings, setBindings, quoteName }: { bindings: Binding[]; setBindings: (value: Binding[]) => void; quoteName: string }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState({ store: '', customer: '', prepaid: '0' });
   const [importMessage, setImportMessage] = useState('');
@@ -292,11 +292,11 @@ function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[
   const [importing, setImporting] = useState(false);
   const add = () => {
     if (!draft.store.trim() || !draft.customer.trim()) return;
-    setBindings([...bindings, { id: crypto.randomUUID(), store: draft.store.trim(), customer: draft.customer.trim(), quote: pricing.quoteName, prepaid: Number(draft.prepaid) || 0 }]);
+    setBindings([...bindings, { id: crypto.randomUUID(), store: draft.store.trim(), customer: draft.customer.trim(), quote: quoteName, prepaid: Number(draft.prepaid) || 0 }]);
     setDraft({ store: '', customer: '', prepaid: '0' });
   };
   const downloadTemplate = () => {
-    const rows = bindings.length ? bindings.map((item) => [item.customer, item.store, item.quote, item.prepaid]) : [['示例客户', '示例旗舰店', pricing.quoteName, 0]];
+    const rows = bindings.length ? bindings.map((item) => [item.customer, item.store, item.quote, item.prepaid]) : [['示例客户', '示例旗舰店', quoteName, 0]];
     downloadCsv('客户店铺结算关系固定模板.csv', [bindingTemplateHeaders, ...rows]);
   };
   const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -306,7 +306,7 @@ function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[
     setImportMessage('');
     try {
       const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
-      const imported = parseBindingTemplate(grid, pricing.quoteName);
+      const imported = parseBindingTemplate(grid, quoteName);
       setBindings(imported);
       setImportError(false);
       setImportMessage(`已导入 ${imported.length} 条结算关系，点击页面右上角“保存”后保留在本机`);
@@ -323,7 +323,7 @@ function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[
       <PageIntro eyebrow="映射决定每一票使用哪份报价" title="一个客户可以绑定多个店铺" description="店铺名称用于总表自动匹配；预付面单费在计算完成后从应收中抵扣。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载关系模板</Button><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{importing ? '正在导入' : '导入结算关系'}</Button></div>} />
       <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
         <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
-        <div><p className="font-semibold">结算关系模板说明</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。固定列为客户名称、店铺名称、报价名称、预付面单费；同一店铺只能出现一次，报价名称需与当前报价“{pricing.quoteName}”一致。</p></div>
+        <div><p className="font-semibold">结算关系模板说明</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。固定列为客户名称、店铺名称、报价名称、预付面单费；同一店铺只能出现一次，报价名称需与当前报价“{quoteName}”一致。</p></div>
       </div>
       {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       <section className="grid gap-5 xl:grid-cols-[360px_1fr]">
@@ -331,7 +331,7 @@ function BindingsEditor({ bindings, setBindings, pricing }: { bindings: Binding[
           <div className="space-y-4 p-5">
             <TextControl label="店铺名称" value={draft.store} setValue={(value) => setDraft({ ...draft, store: value })} placeholder="例如：森屿抖音店" />
             <TextControl label="所属客户" value={draft.customer} setValue={(value) => setDraft({ ...draft, customer: value })} placeholder="例如：森屿电商" />
-            <TextControl label="所用报价" value={pricing.quoteName} setValue={() => {}} disabled />
+            <TextControl label="所用报价" value={quoteName} setValue={() => {}} disabled />
             <NumberControl label="预付面单费" value={draft.prepaid} setValue={(value) => setDraft({ ...draft, prepaid: value })} unit="元" />
             <Button onClick={add} className="h-10 w-full bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Plus />添加绑定</Button>
           </div>
@@ -403,66 +403,6 @@ function gridToShipments(grid: unknown[][]): ShipmentInput[] {
   const track = find([/运单/, /快递单/, /tracking/]); const destination = find([/目的地/, /收件.*省/, /省份/, /destination/]); const weight = find([/结算重量/, /计费重量/, /^重量$/, /weight/]); const store = find([/店铺/, /客户/, /结算对象/, /store/]); const date = find([/日期/, /揽收时间/, /date/]);
   if (destination < 0 || weight < 0) throw new Error('未识别到目的地或重量列，请将表头命名为“目的地”和“重量”');
   return grid.slice(1).map((cells, index) => ({ trackingNo: String(cells[track] ?? `ROW-${index + 2}`), destination: String(cells[destination] ?? ''), weight: Number(cells[weight]), store: store >= 0 ? String(cells[store] ?? '') : '', date: date >= 0 ? formatCellDate(cells[date]) : '' })).filter((row) => row.destination || Number.isFinite(row.weight));
-}
-
-function parseQuoteTemplate(grid: unknown[][]): { pricing: PricingConfig; surcharges: SurchargeRule[] } {
-  if (grid.length < 2) throw new Error('模板中没有可导入的报价数据');
-  const normalizeHeader = (value: unknown) => String(value ?? '').trim().toLowerCase().replace(/[（）\s]/g, (char) => char === '（' ? '(' : char === '）' ? ')' : '');
-  const headers = grid[0].map(normalizeHeader);
-  const indexOf = (name: string) => headers.indexOf(normalizeHeader(name));
-  const missing = quoteTemplateHeaders.filter((name) => indexOf(name) < 0);
-  if (missing.length) throw new Error(`模板表头不完整，缺少：${missing.join('、')}`);
-  const rows = grid.slice(1).filter((row) => row.some((cell) => String(cell ?? '').trim()));
-  if (!rows.length) throw new Error('模板中没有可导入的报价数据');
-  const first = rows[0];
-  const textAt = (row: unknown[], name: string) => String(row[indexOf(name)] ?? '').trim();
-  const numberAt = (row: unknown[], name: string, rowNumber: number) => {
-    const value = Number(row[indexOf(name)]);
-    if (!Number.isFinite(value)) throw new Error(`第 ${rowNumber} 行“${name}”必须是数字`);
-    return value;
-  };
-  const quoteName = textAt(first, '报价名称');
-  if (!quoteName) throw new Error('第 2 行“报价名称”不能为空');
-  const roundingValue = textAt(first, '重量取整');
-  const roundingMap: Record<string, PricingConfig['rounding']> = { '向上取整': 'ceil', '四舍五入': 'round', '向下取整': 'floor', '不取整': 'none', ceil: 'ceil', round: 'round', floor: 'floor', none: 'none' };
-  const rounding = roundingMap[roundingValue.toLowerCase()] ?? roundingMap[roundingValue];
-  if (!rounding) throw new Error('“重量取整”仅支持：向上取整、四舍五入、向下取整、不取整');
-  const pricing: PricingConfig = {
-    quoteName,
-    firstWeight: numberAt(first, '首重重量(kg)', 2),
-    firstPrice: numberAt(first, '首重价格(元)', 2),
-    continuedStep: numberAt(first, '续重单位(kg)', 2),
-    continuedPrice: numberAt(first, '续重价格(元)', 2),
-    minimumCharge: numberAt(first, '最低收费(元)', 2),
-    discount: numberAt(first, '折扣系数', 2),
-    rounding,
-  };
-  if (pricing.firstWeight <= 0 || pricing.continuedStep <= 0) throw new Error('首重重量和续重单位必须大于 0');
-  if ([pricing.firstPrice, pricing.continuedPrice, pricing.minimumCharge, pricing.discount].some((value) => value < 0)) throw new Error('价格、最低收费和折扣系数不能小于 0');
-  const surcharges = rows.map((row, index) => {
-    const rowNumber = index + 2;
-    const name = textAt(row, '附加费规则');
-    const destinationsText = textAt(row, '适用地区');
-    if (!name && !destinationsText) return null;
-    if (!name || !destinationsText) throw new Error(`第 ${rowNumber} 行附加费规则名称和适用地区必须同时填写`);
-    const modeValue = textAt(row, '附加费方式').toLowerCase();
-    const modeMap: Record<string, SurchargeRule['mode']> = { '按票': 'ticket', '按重量': 'weight', ticket: 'ticket', weight: 'weight' };
-    const mode = modeMap[modeValue];
-    if (!mode) throw new Error(`第 ${rowNumber} 行“附加费方式”仅支持按票或按重量`);
-    const enabledValue = textAt(row, '是否启用').toLowerCase();
-    if (!['是', '否', 'true', 'false', '1', '0'].includes(enabledValue)) throw new Error(`第 ${rowNumber} 行“是否启用”仅支持是或否`);
-    const amount = numberAt(row, '附加费金额', rowNumber);
-    if (amount < 0) throw new Error(`第 ${rowNumber} 行附加费金额不能小于 0`);
-    return {
-      id: crypto.randomUUID(),
-      name,
-      destinations: destinationsText.split(/[,，、;；\s]+/).filter(Boolean),
-      mode,
-      amount,
-      enabled: ['是', 'true', '1'].includes(enabledValue),
-    } satisfies SurchargeRule;
-  }).filter((rule): rule is SurchargeRule => rule !== null);
-  return { pricing, surcharges };
 }
 
 function parseBindingTemplate(grid: unknown[][], activeQuote: string): Binding[] {
