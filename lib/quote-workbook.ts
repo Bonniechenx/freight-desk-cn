@@ -53,7 +53,8 @@ const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 1
 const text = (value: unknown) => {
   if (value === null || value === undefined) return '';
   if (value instanceof Date) return value.toISOString();
-  if (['string', 'number', 'boolean', 'bigint'].includes(typeof value)) return String(value).trim();
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value).trim();
   return '';
 };
 

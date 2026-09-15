@@ -161,20 +161,48 @@ function SingleCalculator({ pricing, surcharges, workbookQuote, bindings, goBatc
   );
 }
 
+type BatchColumnMapping = {
+  destination: string;
+  weight: string;
+  quotePlan: string;
+  trackingNo: string;
+  store: string;
+  date: string;
+};
+
+type PendingBatchImport = {
+  fileName: string;
+  grid: unknown[][];
+  headerRow: number;
+};
+
 function BatchCalculator({ pricing, surcharges, workbookQuote, bindings }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuote: ImportedWorkbookQuote | null; bindings: Binding[] }) {
   const [rows, setRows] = useState<ShipmentInput[]>(sampleShipments);
   const [fileName, setFileName] = useState('示例账单.xlsx');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('已载入示例数据，可直接查看计算结果');
+  const [mappingError, setMappingError] = useState('');
+  const [pendingImport, setPendingImport] = useState<PendingBatchImport | null>(null);
+  const [mapping, setMapping] = useState<BatchColumnMapping>({ destination: '', weight: '', quotePlan: '', trackingNo: '', store: '', date: '' });
   const fileRef = useRef<HTMLInputElement>(null);
   const results = useMemo(() => rows.map((row) => {
+    const activeQuoteName = workbookQuote?.quoteName ?? pricing.quoteName;
+    if (row.sourceRow && !row.quotePlan?.trim()) {
+      return { ...row, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid: 0, total: 0, quoteName: activeQuoteName, status: 'error' as const, explanation: `原表第 ${row.sourceRow} 行的报价方案为空` };
+    }
+    if (row.quotePlan && !quoteNamesMatch(row.quotePlan, activeQuoteName)) {
+      return { ...row, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid: 0, total: 0, quoteName: row.quotePlan, status: 'error' as const, explanation: `账单指定报价“${row.quotePlan}”，当前只启用了“${activeQuoteName}”` };
+    }
     const binding = bindings.find((item) => item.store === row.store);
     return workbookQuote ? calculateWorkbookFreight(row, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(row, pricing, surcharges, binding?.prepaid ?? 0);
   }), [rows, pricing, surcharges, workbookQuote, bindings]);
-  const filtered = results.filter((row) => [row.trackingNo, row.destination, row.store].some((value) => String(value ?? '').toLowerCase().includes(search.toLowerCase())));
+  const filtered = results.filter((row) => [row.trackingNo, row.destination, row.store, row.quotePlan].some((value) => String(value ?? '').toLowerCase().includes(search.toLowerCase())));
   const total = results.reduce((sum, row) => sum + row.total, 0);
   const errors = results.filter((row) => row.status === 'error').length;
+  const columnOptions = pendingImport ? getColumnOptions(pendingImport.grid, pendingImport.headerRow) : [];
+  const previewRows = pendingImport ? pendingImport.grid.slice(pendingImport.headerRow + 1).map((row, index) => ({ row, sourceRow: pendingImport.headerRow + index + 2 })).filter((item) => rowHasValue(item.row)).slice(0, 4) : [];
+  const headerCandidates = pendingImport ? getHeaderCandidates(pendingImport.grid) : [];
 
   const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -182,22 +210,71 @@ function BatchCalculator({ pricing, surcharges, workbookQuote, bindings }: { pri
     setLoading(true);
     try {
       const grid = file.name.toLowerCase().endsWith('.csv') ? parseCsv(await file.text()) : await readSheet(file);
-      const parsed = gridToShipments(grid);
-      if (!parsed.length) throw new Error('没有识别到有效账单行');
-      setRows(parsed); setFileName(file.name); setMessage(`已识别 ${parsed.length} 条账单，计算在当前浏览器完成`);
+      if (grid.length < 2) throw new Error('表格中没有足够的数据行');
+      const headerRow = detectHeaderRow(grid);
+      setPendingImport({ fileName: file.name, grid, headerRow });
+      setMapping(inferBatchMapping(grid, headerRow));
+      setMappingError('');
+      setMessage(`已读取 ${file.name}，请选择各字段所在列`);
     } catch (error) { setMessage(error instanceof Error ? error.message : '文件解析失败'); }
     finally { setLoading(false); event.target.value = ''; }
   };
 
+  const changeHeaderRow = (value: string) => {
+    if (!pendingImport) return;
+    const headerRow = Number(value);
+    setPendingImport({ ...pendingImport, headerRow });
+    setMapping(inferBatchMapping(pendingImport.grid, headerRow));
+    setMappingError('');
+  };
+
+  const applyMapping = () => {
+    if (!pendingImport) return;
+    const required = [mapping.destination, mapping.weight, mapping.quotePlan];
+    if (required.some((value) => value === '')) {
+      setMappingError('请先选择目的地、重量和报价方案三列');
+      return;
+    }
+    if (new Set(required).size !== required.length) {
+      setMappingError('目的地、重量和报价方案不能选择同一列');
+      return;
+    }
+    const parsed = gridToMappedShipments(pendingImport.grid, pendingImport.headerRow, mapping);
+    if (!parsed.length) {
+      setMappingError('所选列下方没有可导入的数据');
+      return;
+    }
+    setRows(parsed);
+    setFileName(pendingImport.fileName);
+    setMessage(`已按你的列选择导入 ${parsed.length} 条账单`);
+    setMappingError('');
+    setPendingImport(null);
+  };
+
   const download = () => {
-    const headers = ['运单号', '目的地', '重量kg', '计费重量kg', '店铺', '日期', '基础费用', '附加费', '面单抵扣', '合计运费', '报价', '状态', '计算说明'];
-    const data = results.map((row) => [row.trackingNo, row.destination, row.weight, row.roundedWeight, row.store ?? '', row.date ?? '', row.baseFee, row.surcharge, row.prepaid, row.total, row.quoteName, row.status === 'ok' ? '成功' : '异常', row.explanation]);
+    const headers = ['原表行号', '运单号', '目的地', '重量kg', '计费重量kg', '店铺', '日期', '账单报价方案', '实际使用报价', '基础费用', '附加费', '面单抵扣', '合计运费', '状态', '计算说明'];
+    const data = results.map((row) => [row.sourceRow ?? '', row.trackingNo, row.destination, row.weight, row.roundedWeight, row.store ?? '', row.date ?? '', row.quotePlan ?? '', row.quoteName, row.baseFee, row.surcharge, row.prepaid, row.total, row.status === 'ok' ? '成功' : '异常', row.explanation]);
     downloadCsv('运费核算结果.csv', [headers, ...data]);
   };
 
   return (
     <>
-      <PageIntro eyebrow="本地批量引擎" title="导入一张账单，逐票生成可解释费用" description="支持 XLSX、XLS 和 CSV；自动识别运单号、目的地、重量、店铺与日期列。" action={<><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importFile} /><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{loading ? '正在解析' : '导入账单'}</Button></>} />
+      <PageIntro eyebrow="任意表头均可导入" title="上传账单后，由你指定计费列" description="不要求修改原表。上传后选择目的地、重量和报价方案列；运单号、店铺和日期可按需选择。" action={<><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importFile} /><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{loading ? '正在读取' : '导入账单'}</Button></>} />
+      {pendingImport && <section className="mb-5 overflow-hidden rounded-2xl border border-teal-200 bg-white shadow-[0_14px_44px_rgba(15,23,42,.06)]">
+        <div className="flex flex-col gap-3 border-b border-teal-100 bg-teal-50/70 p-5 md:flex-row md:items-center md:justify-between"><div><p className="text-xs font-semibold text-teal-700">已读取原始账单</p><h3 className="mt-1 font-semibold">{pendingImport.fileName}</h3><p className="mt-1 text-xs text-muted-foreground">原表不会被修改。报价方案值会与“报价管理”中已启用的报价匹配。</p></div><Button variant="ghost" onClick={() => setPendingImport(null)}>取消本次导入</Button></div>
+        <div className="grid gap-4 p-5 lg:grid-cols-4">
+          <MappingSelect label="表头所在行" value={String(pendingImport.headerRow)} setValue={changeHeaderRow} options={headerCandidates.map((item) => ({ value: String(item.index), label: item.label }))} />
+          <MappingSelect required label="目的地列" value={mapping.destination} setValue={(value) => setMapping({ ...mapping, destination: value })} options={columnOptions} />
+          <MappingSelect required label="重量列" value={mapping.weight} setValue={(value) => setMapping({ ...mapping, weight: value })} options={columnOptions} />
+          <MappingSelect required label="报价方案列" value={mapping.quotePlan} setValue={(value) => setMapping({ ...mapping, quotePlan: value })} options={columnOptions} />
+          <MappingSelect label="运单号列（可选）" value={mapping.trackingNo} setValue={(value) => setMapping({ ...mapping, trackingNo: value })} options={columnOptions} optional />
+          <MappingSelect label="店铺列（可选）" value={mapping.store} setValue={(value) => setMapping({ ...mapping, store: value })} options={columnOptions} optional />
+          <MappingSelect label="发货日期列（可选）" value={mapping.date} setValue={(value) => setMapping({ ...mapping, date: value })} options={columnOptions} optional />
+          <div className="flex items-end"><Button onClick={applyMapping} className="h-10 w-full bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Calculator />按所选列开始计算</Button></div>
+        </div>
+        {mappingError && <div className="border-t border-rose-100 bg-rose-50 px-5 py-3 text-sm text-rose-700"><CircleAlert className="mr-2 inline size-4" />{mappingError}</div>}
+        <div className="overflow-x-auto border-t"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>原表行</TableHead><TableHead>目的地预览</TableHead><TableHead>重量预览</TableHead><TableHead>报价方案预览</TableHead></TableRow></TableHeader><TableBody>{previewRows.map((item) => <TableRow key={item.sourceRow}><TableCell className="text-muted-foreground">{item.sourceRow}</TableCell><TableCell>{cellPreview(item.row, mapping.destination)}</TableCell><TableCell>{cellPreview(item.row, mapping.weight)}</TableCell><TableCell>{cellPreview(item.row, mapping.quotePlan)}</TableCell></TableRow>)}</TableBody></Table></div>
+      </section>}
       <section className="grid gap-4 md:grid-cols-3"><Metric label="账单行数" value={String(results.length)} unit="票" trend={fileName} /><Metric label="预计应收" value={`¥${total.toFixed(2)}`} unit="" trend="逐票汇总" /><Metric label="异常待复核" value={String(errors)} unit="票" trend={errors ? '请检查原始列' : '全部通过'} warning={errors > 0} /></section>
       <section className="mt-5 overflow-hidden rounded-2xl border bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]">
         <div className="flex flex-col gap-3 border-b p-4 md:flex-row md:items-center md:justify-between md:px-5">
@@ -205,12 +282,12 @@ function BatchCalculator({ pricing, surcharges, workbookQuote, bindings }: { pri
           <div className="flex gap-2"><div className="relative min-w-0 flex-1 md:w-64"><Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索运单、地区或店铺" className="pl-8" /></div><Button variant="outline" onClick={download}><Download />导出 CSV</Button></div>
         </div>
         <Table>
-          <TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead className="text-right">原重 / 计费重</TableHead><TableHead>店铺</TableHead><TableHead className="text-right">基础费</TableHead><TableHead className="text-right">附加费</TableHead><TableHead className="text-right">抵扣</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
-          <TableBody>{filtered.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`} title={row.explanation}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell className="text-right"><span className="text-muted-foreground">{row.weight}</span><ArrowRight className="mx-1 inline size-3" />{row.roundedWeight}</TableCell><TableCell>{row.store || '—'}</TableCell><TableCell className="text-right">¥{row.baseFee.toFixed(2)}</TableCell><TableCell className="text-right">¥{row.surcharge.toFixed(2)}</TableCell><TableCell className="text-right text-amber-700">-¥{row.prepaid.toFixed(2)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody>
+          <TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead>报价方案</TableHead><TableHead className="text-right">原重 / 计费重</TableHead><TableHead>店铺</TableHead><TableHead className="text-right">基础费</TableHead><TableHead className="text-right">附加费</TableHead><TableHead className="text-right">抵扣</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
+          <TableBody>{filtered.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`} title={row.explanation}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell>{row.quotePlan || row.quoteName}</TableCell><TableCell className="text-right"><span className="text-muted-foreground">{row.weight}</span><ArrowRight className="mx-1 inline size-3" />{row.roundedWeight}</TableCell><TableCell>{row.store || '—'}</TableCell><TableCell className="text-right">¥{row.baseFee.toFixed(2)}</TableCell><TableCell className="text-right">¥{row.surcharge.toFixed(2)}</TableCell><TableCell className="text-right text-amber-700">-¥{row.prepaid.toFixed(2)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody>
         </Table>
         {!filtered.length && <div className="p-10 text-center text-sm text-muted-foreground">没有符合搜索条件的账单</div>}
       </section>
-      <p className="mt-3 text-xs text-muted-foreground">列名可使用：运单号/快递单号、目的地/收件省份、重量/结算重量、店铺/客户、日期/账单日期。</p>
+      <p className="mt-3 text-xs text-muted-foreground">无需固定表头。系统只读取你选中的列，并保留原表行号供异常复核。</p>
     </>
   );
 }
@@ -376,6 +453,10 @@ function NumberControl({ label, value, setValue, unit }: { label: string; value:
   return <label className="space-y-2"><span className="text-xs font-semibold text-slate-600">{label}</span><div className="relative"><Input type="number" min="0" step="0.01" value={value} onChange={(event) => setValue(event.target.value)} className={unit ? 'h-10 pr-10' : 'h-10'} />{unit && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{unit}</span>}</div></label>;
 }
 
+function MappingSelect({ label, value, setValue, options, required, optional }: { label: string; value: string; setValue: (value: string) => void; options: { value: string; label: string }[]; required?: boolean; optional?: boolean }) {
+  return <label className="space-y-2"><span className="text-xs font-semibold text-slate-600">{label}{required && <span className="ml-1 text-rose-500">*</span>}</span><NativeSelect value={value} onChange={(event) => setValue(event.target.value)} className="h-10 bg-white"><NativeSelectOption value="">{optional ? '不使用此列' : '请选择一列'}</NativeSelectOption>{options.map((option) => <NativeSelectOption key={option.value} value={option.value}>{option.label}</NativeSelectOption>)}</NativeSelect></label>;
+}
+
 function PriceRow({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
   return <div className="flex items-center justify-between"><span className="text-slate-400">{label}</span><span className={accent ? 'font-semibold text-white' : 'font-medium text-slate-200'}>{value < 0 ? '-' : ''}¥{Math.abs(value).toFixed(2)}</span></div>;
 }
@@ -396,13 +477,100 @@ function parseCsv(text: string): (string | number | null)[][] {
   row.push(field); if (row.some((item) => item.trim())) rows.push(row); return rows;
 }
 
-function gridToShipments(grid: unknown[][]): ShipmentInput[] {
-  if (grid.length < 2) return [];
-  const headers = grid[0].map((cell) => String(cell ?? '').trim().toLowerCase());
-  const find = (patterns: RegExp[]) => headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
-  const track = find([/运单/, /快递单/, /tracking/]); const destination = find([/目的地/, /收件.*省/, /省份/, /destination/]); const weight = find([/结算重量/, /计费重量/, /^重量$/, /weight/]); const store = find([/店铺/, /客户/, /结算对象/, /store/]); const date = find([/日期/, /揽收时间/, /date/]);
-  if (destination < 0 || weight < 0) throw new Error('未识别到目的地或重量列，请将表头命名为“目的地”和“重量”');
-  return grid.slice(1).map((cells, index) => ({ trackingNo: String(cells[track] ?? `ROW-${index + 2}`), destination: String(cells[destination] ?? ''), weight: Number(cells[weight]), store: store >= 0 ? String(cells[store] ?? '') : '', date: date >= 0 ? formatCellDate(cells[date]) : '' })).filter((row) => row.destination || Number.isFinite(row.weight));
+function cellText(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value).trim();
+  return '';
+}
+
+function rowHasValue(row: unknown[]) {
+  return row.some((cell) => cellText(cell) !== '');
+}
+
+function columnLetter(index: number) {
+  let value = index + 1;
+  let result = '';
+  while (value > 0) {
+    value -= 1;
+    result = String.fromCharCode(65 + (value % 26)) + result;
+    value = Math.floor(value / 26);
+  }
+  return result;
+}
+
+function detectHeaderRow(grid: unknown[][]) {
+  const candidates = grid.slice(0, 20).map((row, index) => ({ index, count: row.filter((cell) => cellText(cell) !== '').length }));
+  return candidates.sort((a, b) => b.count - a.count || a.index - b.index)[0]?.index ?? 0;
+}
+
+function getHeaderCandidates(grid: unknown[][]) {
+  return grid.slice(0, 20).map((row, index) => ({ index, cells: row.map(cellText).filter(Boolean) })).filter((item) => item.cells.length).map((item) => ({ index: item.index, label: `第 ${item.index + 1} 行 · ${item.cells.slice(0, 3).join(' / ')}` }));
+}
+
+function getColumnOptions(grid: unknown[][], headerRow: number) {
+  const nearbyRows = grid.slice(headerRow, headerRow + 6);
+  const columnCount = nearbyRows.reduce((largest, row) => Math.max(largest, row.length), 0);
+  return Array.from({ length: columnCount }, (_, index) => {
+    const heading = cellText(grid[headerRow]?.[index]) || '无表头';
+    const sample = grid.slice(headerRow + 1, headerRow + 5).map((row) => cellText(row[index])).find(Boolean);
+    return { value: String(index), label: `${columnLetter(index)}列 · ${heading}${sample ? `（例：${sample.slice(0, 12)}）` : ''}` };
+  });
+}
+
+function inferBatchMapping(grid: unknown[][], headerRow: number): BatchColumnMapping {
+  const headers = (grid[headerRow] ?? []).map((cell) => cellText(cell).toLowerCase());
+  const find = (patterns: RegExp[]) => {
+    const index = headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
+    return index < 0 ? '' : String(index);
+  };
+  return {
+    destination: find([/目的地/, /收件.*省/, /收货.*地/, /省份/, /destination/]),
+    weight: find([/结算重量/, /计费重量/, /实际重量/, /重量/, /weight/]),
+    quotePlan: find([/报价方案/, /报价名称/, /计费方案/, /快递产品/, /承运方案/]),
+    trackingNo: find([/运单号/, /快递单号/, /物流单号/, /tracking/]),
+    store: find([/店铺/, /客户/, /结算对象/, /store/]),
+    date: find([/发货日期/, /揽收时间/, /账单日期/, /日期/, /date/]),
+  };
+}
+
+function parseWeightCell(value: unknown) {
+  if (typeof value === 'number') return value;
+  const normalized = cellText(value).replaceAll(',', '').replace(/千克|公斤|kg/gi, '').trim();
+  const matched = normalized.match(/-?\d+(?:\.\d+)?/);
+  return matched ? Number(matched[0]) : Number.NaN;
+}
+
+function gridToMappedShipments(grid: unknown[][], headerRow: number, mapping: BatchColumnMapping): ShipmentInput[] {
+  const indexOf = (value: string) => value === '' ? -1 : Number(value);
+  const destination = indexOf(mapping.destination);
+  const weight = indexOf(mapping.weight);
+  const quotePlan = indexOf(mapping.quotePlan);
+  const trackingNo = indexOf(mapping.trackingNo);
+  const store = indexOf(mapping.store);
+  const date = indexOf(mapping.date);
+  return grid.slice(headerRow + 1).map((row, index) => ({ row, sourceRow: headerRow + index + 2 })).filter(({ row }) => rowHasValue(row) && [destination, weight, quotePlan].some((column) => cellText(row[column]) !== '')).map(({ row, sourceRow }) => ({
+    trackingNo: trackingNo >= 0 ? cellText(row[trackingNo]) || `ROW-${sourceRow}` : `ROW-${sourceRow}`,
+    destination: cellText(row[destination]),
+    weight: parseWeightCell(row[weight]),
+    quotePlan: cellText(row[quotePlan]),
+    store: store >= 0 ? cellText(row[store]) : '',
+    date: date >= 0 ? formatCellDate(row[date]) : '',
+    sourceRow,
+  }));
+}
+
+function cellPreview(row: unknown[], column: string) {
+  if (column === '') return <span className="text-amber-600">请选择列</span>;
+  return cellText(row[Number(column)]) || <span className="text-muted-foreground">空白</span>;
+}
+
+function quoteNamesMatch(requested: string, active: string) {
+  const normalize = (value: string) => value.toLowerCase().replace(/\.(xlsx|xls)$/i, '').replace(/[\s_—–-]+/g, '');
+  const requestedName = normalize(requested);
+  const activeName = normalize(active);
+  return requestedName === activeName || (requestedName.length >= 2 && activeName.includes(requestedName)) || (activeName.length >= 2 && requestedName.includes(activeName));
 }
 
 function parseBindingTemplate(grid: unknown[][], activeQuote: string): Binding[] {

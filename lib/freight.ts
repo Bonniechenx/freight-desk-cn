@@ -24,8 +24,10 @@ export type ShipmentInput = {
   trackingNo: string;
   destination: string;
   weight: number;
+  quotePlan?: string;
   store?: string;
   date?: string;
+  sourceRow?: number;
 };
 
 export type FeeResult = ShipmentInput & {
