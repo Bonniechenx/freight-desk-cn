@@ -83,8 +83,8 @@ function normalizeDestination(value: string) {
 
 function destinationLevel(value: string) {
   const target = value.trim();
-  if (/^(区|县|district)\s*[:：]/i.test(target) || target.endsWith('区') || target.endsWith('县')) return 300;
-  if (/^(市|city)\s*[:：]/i.test(target) || /[【[]/.test(target) || target.endsWith('市')) return 200;
+  if (/^(区|县|district)\s*[:：]/i.test(target) || target.endsWith('区') || target.endsWith('县') || target.endsWith('旗')) return 300;
+  if (/^(市|city)\s*[:：]/i.test(target) || /[【[]/.test(target) || target.endsWith('市') || target.endsWith('州') || target.endsWith('盟')) return 200;
   if (/^(省|province)\s*[:：]/i.test(target) || target.endsWith('省') || target.endsWith('自治区') || target.endsWith('特别行政区')) return 100;
   return 0;
 }
@@ -163,7 +163,7 @@ function parseModernBaseSheet(data: unknown[][]) {
         const continued = overIndex >= 0 ? parseContinuedRule(header, subheader, row, overIndex, fallbackThreshold) : null;
         if (bands.length || continued) {
           const destinations = splitDestinations(destinationText);
-          const destinationPriority = Math.max(0, ...destinations.map(destinationLevel));
+          const destinationPriority = Math.max(100, ...destinations.map(destinationLevel));
           rules.push({ destinations, destinationPriority, conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '', dateLabel: date.label, dateStart: date.start, dateEnd: date.end, bands, continued });
         }
       }
@@ -204,7 +204,7 @@ function parseLegacyBaseSheet(data: unknown[][]) {
   const header = data[0] ?? [];
   return data.slice(1).map((row) => {
     const parsed = parseGroupedRateRow(header, row, 2);
-    return { destinations: splitDestinations(row[0]), destinationPriority: 0, conditionLabel: '', dateLabel: '', dateStart: null, dateEnd: null, ...parsed } satisfies BaseRateRule;
+    return { destinations: splitDestinations(row[0]), destinationPriority: 100, conditionLabel: '', dateLabel: '', dateStart: null, dateEnd: null, ...parsed } satisfies BaseRateRule;
   }).filter((rule) => rule.destinations.length && (rule.bands.length || rule.continued));
 }
 
@@ -225,7 +225,7 @@ function parseExtraSheet(data: unknown[][]) {
       name: text(row[nameIndex >= 0 ? nameIndex : 0]) || '未命名加收费',
       destinations,
       excludesDestinations: destinationText.startsWith('【排除】'),
-      destinationPriority: Math.max(0, ...destinations.map(destinationLevel)),
+      destinationPriority: destinations.length ? Math.max(100, ...destinations.map(destinationLevel)) : 0,
       conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '',
       dateLabel: date.label,
       dateStart: date.start,
@@ -276,11 +276,24 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
   };
 }
 
-function destinationSpecificity(ruleDestinations: string[], destination: string) {
+function destinationSpecificity(ruleDestinations: string[], destination: string, rulePriority = 0) {
   const target = normalizeDestination(destination);
+  const parts = destination.split(/\s*(?:\/|>|\||\+)\s*/).map((part) => part.trim()).filter(Boolean).map((part) => ({ normalized: normalizeDestination(part), level: destinationLevel(part) }));
   return Math.max(...ruleDestinations.map((place) => {
     const normalized = normalizeDestination(place);
-    return normalized && target.includes(normalized) ? destinationLevel(place) + normalized.length : -1;
+    const level = destinationLevel(place) || rulePriority || 100;
+    if (!normalized) return -1;
+    if (level === 100) {
+      const explicitProvinceParts = parts.filter((part) => part.level === 100);
+      const provinceParts = explicitProvinceParts.length ? explicitProvinceParts : parts[0]?.level < 200 ? [parts[0]] : [];
+      const matched = parts.length > 1 ? provinceParts.some((part) => part.normalized === normalized || part.normalized.startsWith(normalized)) : target.startsWith(normalized);
+      return matched ? 100 + normalized.length : -1;
+    }
+    if (parts.length > 1 && level >= 200) {
+      const matched = parts.some((part) => part.level === level && (part.normalized === normalized || part.normalized.includes(normalized)));
+      return matched ? level + normalized.length : -1;
+    }
+    return target.includes(normalized) ? level + normalized.length : -1;
   }));
 }
 
@@ -328,7 +341,7 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: '目的地为空或重量不是有效正数' };
   }
   const destinationMatches = quote.baseRules.map((rule) => {
-    const matchedLength = destinationSpecificity(rule.destinations, input.destination);
+    const matchedLength = destinationSpecificity(rule.destinations, input.destination, rule.destinationPriority ?? 0);
     return { rule, specificity: matchedLength < 0 ? -1 : matchedLength + (rule.destinationPriority ?? 0) };
   }).filter((item) => item.specificity >= 0);
   const datedMatches = destinationMatches.filter(({ rule }) => dateMatches(rule, input.date));
@@ -354,7 +367,7 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: `重量 ${weight}kg 超出已配置公斤段，且没有可用续重规则` };
   }
   const matchedExtras = quote.extraRules.map((rule) => {
-    const destinationMatched = rule.destinations.length === 0 || destinationSpecificity(rule.destinations, input.destination) >= 0;
+    const destinationMatched = rule.destinations.length === 0 || destinationSpecificity(rule.destinations, input.destination, rule.destinationPriority ?? 0) >= 0;
     const destinationApplies = rule.excludesDestinations ? !destinationMatched : destinationMatched;
     const conditionApplies = conditionSpecificity(rule.conditionLabel ?? '', input.rateCondition) >= 0;
     return { rule, applies: destinationApplies && conditionApplies && dateMatches(rule, input.date) };

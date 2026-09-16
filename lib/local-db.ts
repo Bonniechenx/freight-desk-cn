@@ -4,6 +4,7 @@ export type AppConfigSnapshot = {
   pricing: unknown;
   surcharges: unknown;
   bindings: unknown;
+  bindingProfiles: unknown;
   workbookQuotes: unknown;
   quoteFolders: unknown;
 };
@@ -18,6 +19,7 @@ export type BillRecord = {
   results: FeeResult[];
   originalGrid?: unknown[][];
   headerRow?: number;
+  relationProfileName?: string;
 };
 
 const DATABASE_NAME = 'freight-desk-cn';
