@@ -26,7 +26,9 @@ export type ShipmentInput = {
   weight: number;
   quotePlan?: string;
   rateCondition?: string;
+  customer?: string;
   store?: string;
+  matchFields?: Record<string, string>;
   date?: string;
   sourceRow?: number;
 };
