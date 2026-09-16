@@ -40,6 +40,7 @@ export type ExtraRateRule = {
 export type ImportedWorkbookQuote = {
   quoteName: string;
   sourceFile: string;
+  folderId?: string;
   baseRules: BaseRateRule[];
   extraRules: ExtraRateRule[];
   periods: string[];

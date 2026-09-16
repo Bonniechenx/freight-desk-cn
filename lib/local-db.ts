@@ -5,6 +5,7 @@ export type AppConfigSnapshot = {
   surcharges: unknown;
   bindings: unknown;
   workbookQuotes: unknown;
+  quoteFolders: unknown;
 };
 
 export type BillRecord = {

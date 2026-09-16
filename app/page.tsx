@@ -3,7 +3,7 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown, ArrowRight, ArrowUp, Boxes, Calculator, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert,
-  Database, Download, FileClock, FileSpreadsheet, Folder, LayoutDashboard, MapPin, PackageCheck, Plus,
+  Database, Download, FileClock, FileSpreadsheet, Folder, FolderPlus, LayoutDashboard, MapPin, PackageCheck, Plus,
   ReceiptText, Save, Search, ShieldCheck, Store,
   Trash2, Upload, Weight,
 } from 'lucide-react';
@@ -29,6 +29,9 @@ import {
 
 type View = 'single' | 'batch' | 'quotes' | 'bindings' | 'records';
 type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number; matchKey?: string; conditions?: Record<string, string> };
+type QuoteFolder = { id: string; name: string };
+
+const UNFILED_FOLDER_ID = '__unfiled__';
 
 const sampleShipments: ShipmentInput[] = [
   { trackingNo: 'YT20260915001', destination: '广东省深圳市', weight: 0.86, store: '森屿旗舰店', customer: '森屿电商', settlementKey: '森屿电商+森屿旗舰店', date: '2026-09-15' },
@@ -49,6 +52,7 @@ export default function Home() {
   const [surcharges, setSurcharges] = useState<SurchargeRule[]>(defaultSurcharges);
   const [bindings, setBindings] = useState<Binding[]>(initialBindings);
   const [workbookQuotes, setWorkbookQuotes] = useState<ImportedWorkbookQuote[]>([]);
+  const [quoteFolders, setQuoteFolders] = useState<QuoteFolder[]>([]);
   const [saved, setSaved] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [historyRevision, setHistoryRevision] = useState(0);
@@ -65,13 +69,14 @@ export default function Home() {
           if (parsed.bindings) setBindings((parsed.bindings as Binding[]).map(migrateBinding));
           if (Array.isArray(parsed.workbookQuotes)) setWorkbookQuotes(parsed.workbookQuotes as ImportedWorkbookQuote[]);
           else if (parsed.workbookQuote) setWorkbookQuotes([parsed.workbookQuote as ImportedWorkbookQuote]);
+          if (Array.isArray(parsed.quoteFolders)) setQuoteFolders(parsed.quoteFolders as QuoteFolder[]);
         }
       } catch { /* ignore invalid local draft */ }
       finally { setHydrated(true); }
     })();
   }, []);
 
-  const configSnapshot = useMemo<AppConfigSnapshot>(() => ({ pricing, surcharges, bindings, workbookQuotes }), [pricing, surcharges, bindings, workbookQuotes]);
+  const configSnapshot = useMemo<AppConfigSnapshot>(() => ({ pricing, surcharges, bindings, workbookQuotes, quoteFolders }), [pricing, surcharges, bindings, workbookQuotes, quoteFolders]);
 
   const saveConfig = () => {
     void saveAppConfig(configSnapshot);
@@ -95,7 +100,7 @@ export default function Home() {
           <div className="mx-auto max-w-[1480px] p-4 md:p-8">
             <div className={view === 'single' ? '' : 'hidden'}><SingleCalculator pricing={pricing} surcharges={surcharges} workbookQuotes={workbookQuotes} bindings={bindings} goBatch={() => setView('batch')} /></div>
             <div className={view === 'batch' ? '' : 'hidden'}><BatchCalculator pricing={pricing} surcharges={surcharges} workbookQuotes={workbookQuotes} bindings={bindings} onRecordSaved={() => setHistoryRevision((value) => value + 1)} /></div>
-            <div className={view === 'quotes' ? '' : 'hidden'}><QuoteEditor pricing={pricing} setPricing={setPricing} surcharges={surcharges} setSurcharges={setSurcharges} workbookQuotes={workbookQuotes} setWorkbookQuotes={setWorkbookQuotes} saveConfig={saveConfig} /></div>
+            <div className={view === 'quotes' ? '' : 'hidden'}><QuoteEditor pricing={pricing} setPricing={setPricing} surcharges={surcharges} setSurcharges={setSurcharges} workbookQuotes={workbookQuotes} setWorkbookQuotes={setWorkbookQuotes} quoteFolders={quoteFolders} setQuoteFolders={setQuoteFolders} saveConfig={saveConfig} /></div>
             <div className={view === 'bindings' ? '' : 'hidden'}><BindingsEditor bindings={bindings} setBindings={setBindings} quoteNames={workbookQuotes.length ? workbookQuotes.map((quote) => quote.quoteName) : [pricing.quoteName]} /></div>
             <div className={view === 'records' ? '' : 'hidden'}><LocalDataCenter revision={historyRevision} config={configSnapshot} workbookQuotes={workbookQuotes} bindings={bindings} /></div>
           </div>
@@ -349,14 +354,28 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings, onReco
   );
 }
 
-function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQuotes, setWorkbookQuotes, saveConfig }: { pricing: PricingConfig; setPricing: (value: PricingConfig) => void; surcharges: SurchargeRule[]; setSurcharges: (value: SurchargeRule[]) => void; workbookQuotes: ImportedWorkbookQuote[]; setWorkbookQuotes: (value: ImportedWorkbookQuote[]) => void; saveConfig: () => void }) {
+function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQuotes, setWorkbookQuotes, quoteFolders, setQuoteFolders, saveConfig }: { pricing: PricingConfig; setPricing: (value: PricingConfig) => void; surcharges: SurchargeRule[]; setSurcharges: (value: SurchargeRule[]) => void; workbookQuotes: ImportedWorkbookQuote[]; setWorkbookQuotes: (value: ImportedWorkbookQuote[]) => void; quoteFolders: QuoteFolder[]; setQuoteFolders: (value: QuoteFolder[]) => void; saveConfig: () => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [targetFolderId, setTargetFolderId] = useState(UNFILED_FOLDER_ID);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
   const updateNumber = (key: keyof PricingConfig, value: string) => setPricing({ ...pricing, [key]: Number(value) || 0 });
   const updateRule = (id: string, patch: Partial<SurchargeRule>) => setSurcharges(surcharges.map((item) => item.id === id ? { ...item, ...patch } : item));
   const addRule = () => setSurcharges([...surcharges, { id: crypto.randomUUID(), name: '新附加费', destinations: ['海南'], mode: 'ticket', amount: 1, enabled: true }]);
+  const createFolder = () => {
+    const name = newFolderName.trim();
+    if (!name || quoteFolders.some((folder) => folder.name.toLowerCase() === name.toLowerCase())) return;
+    const folder = { id: crypto.randomUUID(), name };
+    setQuoteFolders([...quoteFolders, folder]);
+    setTargetFolderId(folder.id);
+    setNewFolderName('');
+    setShowNewFolder(false);
+    setImportError(false);
+    setImportMessage(`已新建文件夹“${name}”，下一份报价将导入到这里`);
+  };
   const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -364,10 +383,11 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQ
     setImportMessage('');
     try {
       const sheets = await readXlsxFile(file);
-      const imported = parseWorkbookQuote(file.name, sheets as WorkbookSheet[]);
+      const imported = { ...parseWorkbookQuote(file.name, sheets as WorkbookSheet[]), folderId: targetFolderId === UNFILED_FOLDER_ID ? undefined : targetFolderId };
       setWorkbookQuotes([...workbookQuotes.filter((quote) => !quoteNamesMatch(quote.quoteName, imported.quoteName)), imported]);
       setImportError(false);
-      setImportMessage(`已加入“${imported.quoteName}”：${imported.baseRules.length} 条基础费用、${imported.extraRules.length} 条加收费；再次导入同名文件会更新该报价`);
+      const folderName = quoteFolders.find((folder) => folder.id === targetFolderId)?.name ?? '未分类';
+      setImportMessage(`已将“${imported.quoteName}”加入“${folderName}”：${imported.baseRules.length} 条基础费用、${imported.extraRules.length} 条加收费`);
     } catch (error) {
       setImportError(true);
       setImportMessage(error instanceof Error ? error.message : '运费宝报价解析失败');
@@ -376,11 +396,16 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQ
       event.target.value = '';
     }
   };
+  const folderGroups = [
+    ...quoteFolders.map((folder) => ({ ...folder, quotes: workbookQuotes.filter((quote) => quote.folderId === folder.id) })),
+    { id: UNFILED_FOLDER_ID, name: '未分类', quotes: workbookQuotes.filter((quote) => !quote.folderId || !quoteFolders.some((folder) => folder.id === quote.folderId)) },
+  ].filter((folder) => folder.id !== UNFILED_FOLDER_ID || folder.quotes.length > 0 || quoteFolders.length === 0);
   return (
     <>
-      <PageIntro eyebrow={`${workbookQuotes.length} 份报价已导入`} title="管理多份运费宝报价" description="每份报价保留自己的物流条件、生效日期、目的地和公斤段；结算关系通过任意条件组合选择其中一份。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx" onChange={importTemplate} /><Button variant="outline" onClick={() => fileRef.current?.click()} className="h-10"><Upload />{importing ? '正在识别' : '继续导入报价'}</Button><Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button></div>} />
+      <PageIntro eyebrow={`${workbookQuotes.length} 份报价 · ${quoteFolders.length} 个文件夹`} title="按文件夹管理运费宝报价" description="导入前先选择目标文件夹，也可以现场新建；展开文件夹后再查看其中的报价与规则。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx" onChange={importTemplate} /><NativeSelect value={targetFolderId} onChange={(event) => setTargetFolderId(event.target.value)} className="h-10 min-w-40 bg-white"><NativeSelectOption value={UNFILED_FOLDER_ID}>导入到：未分类</NativeSelectOption>{quoteFolders.map((folder) => <NativeSelectOption key={folder.id} value={folder.id}>导入到：{folder.name}</NativeSelectOption>)}</NativeSelect><Button variant="outline" onClick={() => setShowNewFolder((value) => !value)} className="h-10"><FolderPlus />新建文件夹</Button><Button variant="outline" onClick={() => fileRef.current?.click()} className="h-10"><Upload />{importing ? '正在识别' : '导入报价'}</Button><Button onClick={saveConfig} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Save />保存报价</Button></div>} />
+      {showNewFolder && <section className="mb-5 flex flex-col gap-3 rounded-2xl border border-teal-200 bg-teal-50/60 p-4 sm:flex-row sm:items-end"><TextControl label="新文件夹名称" value={newFolderName} setValue={setNewFolderName} placeholder="例如：壹令云仓-成本" /><Button onClick={createFolder} disabled={!newFolderName.trim()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><FolderPlus />创建并选中</Button><Button variant="ghost" onClick={() => { setShowNewFolder(false); setNewFolderName(''); }} className="h-10">取消</Button></section>}
       <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900"><MapPin className="mt-0.5 size-5 shrink-0 text-sky-600" /><div><p className="font-semibold">目的地层级与加收费已自动识别</p><p className="mt-1 text-xs leading-5 text-sky-800">推荐在报价中写完整名称（广东省、深圳市、南山区）。没有后缀时可写“省:广东 / 市:深圳 / 区:南山”；原有“【深圳】”也按市级特殊规则识别。计算时按区 → 市 → 省选择最具体规则。“加收费用”Sheet 会按目的地、物流条件、生效日期和重量规则叠加。</p></div></div>
-      {workbookQuotes.length ? <section className="mb-5 overflow-hidden rounded-2xl border bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]"><Accordion defaultValue={[workbookQuotes[0]?.quoteName]}>{workbookQuotes.map((workbookQuote) => <AccordionItem key={workbookQuote.quoteName} value={workbookQuote.quoteName} className="px-4 md:px-5"><AccordionTrigger className="py-4 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{workbookQuote.quoteName}</p><p className="mt-1 truncate text-xs font-normal text-muted-foreground">{workbookQuote.sourceFile} · 基础 {workbookQuote.baseRules.length} 条 · 加收 {workbookQuote.extraRules.length} 条</p></div></div></AccordionTrigger><AccordionContent className="pb-5"><div className="rounded-xl border bg-slate-50/60 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold text-emerald-700"><CheckCircle2 className="size-4" />报价已启用</div><Button variant="outline" size="sm" onClick={() => setWorkbookQuotes(workbookQuotes.filter((quote) => quote.quoteName !== workbookQuote.quoteName))}><Trash2 className="text-rose-600" />移除报价</Button></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><CompactMetric label="基础费用" value={`${workbookQuote.baseRules.length} 条`} /><CompactMetric label="加收费用" value={`${workbookQuote.extraRules.length} 条`} /><CompactMetric label="物流条件" value={`${workbookQuote.conditionLabels?.length ?? 0} 种`} /><CompactMetric label="生效期" value={`${workbookQuote.periods.length || 1} 个`} /></div><div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-3"><QuoteTagGroup label="已识别工作表" values={workbookQuote.detectedSheets} /><QuoteTagGroup label="物流公司 / 报价条件" values={workbookQuote.conditionLabels ?? []} accent /><QuoteTagGroup label="加收费用明细" values={workbookQuote.extraRules.map((rule) => rule.name)} accent /></div>{workbookQuote.warnings.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{workbookQuote.warnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}</div></AccordionContent></AccordionItem>)}</Accordion></section> : <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900"><FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" /><div><p className="font-semibold">可连续导入多份报价</p><p className="mt-1 text-xs leading-5 text-sky-800">每个 XLSX 文件形成一份独立报价；再次导入同名文件会更新原报价。</p></div></div>}
+      {workbookQuotes.length || quoteFolders.length ? <section className="mb-5 overflow-hidden rounded-2xl border bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]"><Accordion defaultValue={[folderGroups[0]?.id]}>{folderGroups.map((folder) => <QuoteFolderGroup key={folder.id} folder={folder} quoteFolders={quoteFolders} onMoveQuote={(quoteName, folderId) => setWorkbookQuotes(workbookQuotes.map((quote) => quote.quoteName === quoteName ? { ...quote, folderId: folderId === UNFILED_FOLDER_ID ? undefined : folderId } : quote))} onRemoveQuote={(quoteName) => setWorkbookQuotes(workbookQuotes.filter((quote) => quote.quoteName !== quoteName))} onRemoveFolder={() => { setQuoteFolders(quoteFolders.filter((item) => item.id !== folder.id)); if (targetFolderId === folder.id) setTargetFolderId(UNFILED_FOLDER_ID); }} />)}</Accordion></section> : <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900"><FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" /><div><p className="font-semibold">先建文件夹，再导入报价</p><p className="mt-1 text-xs leading-5 text-sky-800">也可以直接导入到“未分类”，之后再把报价移动到新文件夹。</p></div></div>}
       {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       {!workbookQuotes.length && <><div className="mb-3"><h3 className="font-semibold">手工报价</h3><p className="mt-1 text-xs text-muted-foreground">没有现成运费宝文件时，可用这组简化规则试算。</p></div>
       <div className="grid gap-5 xl:grid-cols-[1fr_1.2fr]">
@@ -412,6 +437,16 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQ
       </div></>}
     </>
   );
+}
+
+function QuoteFolderGroup({ folder, quoteFolders, onMoveQuote, onRemoveQuote, onRemoveFolder }: { folder: QuoteFolder & { quotes: ImportedWorkbookQuote[] }; quoteFolders: QuoteFolder[]; onMoveQuote: (quoteName: string, folderId: string) => void; onRemoveQuote: (quoteName: string) => void; onRemoveFolder: () => void }) {
+  return <AccordionItem value={folder.id} className="px-4 md:px-5">
+    <AccordionTrigger className="py-4 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 fill-sky-100 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{folder.name}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{folder.quotes.length} 份报价</p></div></div></AccordionTrigger>
+    <AccordionContent className="pb-5">
+      {folder.id !== UNFILED_FOLDER_ID && <div className="mb-3 flex justify-end"><Button variant="ghost" size="sm" disabled={folder.quotes.length > 0} title={folder.quotes.length ? '请先移动或移除文件夹中的报价' : '删除空文件夹'} onClick={onRemoveFolder}><Trash2 className="text-rose-600" />删除空文件夹</Button></div>}
+      {folder.quotes.length ? <div className="overflow-hidden rounded-xl border bg-slate-50/50"><Accordion defaultValue={[folder.quotes[0].quoteName]}>{folder.quotes.map((quote) => <AccordionItem key={quote.quoteName} value={quote.quoteName} className="px-4"><AccordionTrigger className="py-3 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><FileSpreadsheet className="size-4 shrink-0 text-emerald-600" /><div className="min-w-0"><p className="truncate font-medium">{quote.quoteName}</p><p className="mt-1 truncate text-xs font-normal text-muted-foreground">{quote.sourceFile} · 基础 {quote.baseRules.length} 条 · 加收 {quote.extraRules.length} 条</p></div></div></AccordionTrigger><AccordionContent className="pb-4"><div className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-end justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold text-emerald-700"><CheckCircle2 className="size-4" />报价已启用</div><div className="flex flex-wrap items-end gap-2"><label className="space-y-1"><span className="block text-[11px] font-semibold text-slate-500">所属文件夹</span><NativeSelect value={quote.folderId ?? UNFILED_FOLDER_ID} onChange={(event) => onMoveQuote(quote.quoteName, event.target.value)} className="h-9 min-w-36"><NativeSelectOption value={UNFILED_FOLDER_ID}>未分类</NativeSelectOption>{quoteFolders.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></label><Button variant="outline" size="sm" onClick={() => onRemoveQuote(quote.quoteName)}><Trash2 className="text-rose-600" />移除报价</Button></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><CompactMetric label="基础费用" value={`${quote.baseRules.length} 条`} /><CompactMetric label="加收费用" value={`${quote.extraRules.length} 条`} /><CompactMetric label="物流条件" value={`${quote.conditionLabels?.length ?? 0} 种`} /><CompactMetric label="生效期" value={`${quote.periods.length || 1} 个`} /></div><div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-3"><QuoteTagGroup label="已识别工作表" values={quote.detectedSheets} /><QuoteTagGroup label="物流公司 / 报价条件" values={quote.conditionLabels ?? []} accent /><QuoteTagGroup label="加收费用明细" values={quote.extraRules.map((rule) => rule.name)} accent /></div>{quote.warnings.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{quote.warnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}</div></AccordionContent></AccordionItem>)}</Accordion></div> : <div className="rounded-xl border border-dashed bg-slate-50 p-8 text-center text-sm text-muted-foreground">这个文件夹还是空的。请在页面上方选中它，再导入报价。</div>}
+    </AccordionContent>
+  </AccordionItem>;
 }
 
 function BindingsEditor({ bindings, setBindings, quoteNames }: { bindings: Binding[]; setBindings: (value: Binding[]) => void; quoteNames: string[] }) {
