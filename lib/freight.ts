@@ -25,6 +25,7 @@ export type ShipmentInput = {
   destination: string;
   weight: number;
   quotePlan?: string;
+  rateCondition?: string;
   store?: string;
   date?: string;
   sourceRow?: number;

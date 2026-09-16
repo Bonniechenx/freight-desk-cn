@@ -16,6 +16,7 @@ export type ContinuedRule = {
 export type BaseRateRule = {
   destinations: string[];
   destinationPriority: number;
+  conditionLabel: string;
   dateLabel: string;
   dateStart: string | null;
   dateEnd: string | null;
@@ -38,6 +39,7 @@ export type ImportedWorkbookQuote = {
   extraRules: ExtraRateRule[];
   periods: string[];
   bandLabels: string[];
+  conditionLabels: string[];
   globalSettings: {
     doubleWeight: boolean;
     roundContinuedOnly: boolean;
@@ -76,8 +78,12 @@ function splitDestinations(value: unknown) {
 
 function parseDateRange(value: unknown) {
   const label = text(value);
-  const matches = label.match(/(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
-  return { label, start: matches?.[1] ?? null, end: matches?.[2] ?? null };
+  if (value instanceof Date) {
+    const date = value.toISOString().slice(0, 10);
+    return { label: date, start: date, end: null };
+  }
+  const dates = [...label.matchAll(/(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?/g)].map((match) => `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`);
+  return { label, start: dates[0] ?? null, end: dates[1] ?? null };
 }
 
 function parseWeight(value: unknown) {
@@ -116,22 +122,31 @@ function parseModernBaseSheet(data: unknown[][]) {
   const rules: BaseRateRule[] = [];
   for (let rowIndex = 0; rowIndex < data.length; rowIndex += 1) {
     const header = data[rowIndex] ?? [];
-    if (!text(header[0]).includes('目的地')) continue;
+    const destinationIndex = header.findIndex((cell) => /目的地|收件地区|收货地区/.test(text(cell)));
+    if (destinationIndex < 0) continue;
     const subheader = data[rowIndex + 1] ?? [];
-    const overIndex = header.findIndex((cell, index) => index >= 2 && /以上/.test(text(cell)));
-    const bandColumns = header.map((cell, index) => ({ index, limit: number(cell) })).filter((item) => item.index >= 2 && item.limit !== null && (overIndex < 0 || item.index < overIndex)) as Array<{ index: number; limit: number }>;
+    const conditionIndex = header.findIndex((cell) => /附加条件|物流公司|计费渠道|报价条件/.test(text(cell)));
+    const dateRangeIndex = header.findIndex((cell) => /生效日期|生效时间|有效期/.test(text(cell)));
+    const dateStartIndex = header.findIndex((cell) => /生效开始|开始日期/.test(text(cell)));
+    const dateEndIndex = header.findIndex((cell) => /生效结束|结束日期|失效日期/.test(text(cell)));
+    const overIndex = header.findIndex((cell) => /以上/.test(text(cell)));
+    const reserved = new Set([destinationIndex, conditionIndex, dateRangeIndex, dateStartIndex, dateEndIndex].filter((index) => index >= 0));
+    const bandColumns = header.map((cell, index) => ({ index, limit: parseWeight(cell) })).filter((item) => !reserved.has(item.index) && item.limit !== null && (overIndex < 0 || item.index < overIndex)) as Array<{ index: number; limit: number }>;
     const fallbackThreshold = bandColumns.at(-1)?.limit ?? 0;
     let dataIndex = rowIndex + 2;
-    while (dataIndex < data.length && !text(data[dataIndex]?.[0]).includes('目的地')) {
+    while (dataIndex < data.length && !/目的地|收件地区|收货地区/.test(text(data[dataIndex]?.[destinationIndex]))) {
       const row = data[dataIndex] ?? [];
-      const destinationText = text(row[0]);
+      const destinationText = text(row[destinationIndex]);
       if (destinationText) {
-        const date = parseDateRange(row[1]);
+        const rangeDate = dateRangeIndex >= 0 ? parseDateRange(row[dateRangeIndex]) : { label: '', start: null, end: null };
+        const startDate = dateStartIndex >= 0 ? parseDateRange(row[dateStartIndex]).start : null;
+        const endDate = dateEndIndex >= 0 ? parseDateRange(row[dateEndIndex]).start : null;
+        const date = { label: rangeDate.label || [startDate, endDate].filter(Boolean).join('至'), start: startDate ?? rangeDate.start, end: endDate ?? rangeDate.end };
         const bands = bandColumns.map(({ index, limit }) => ({ upTo: limit, price: number(row[index]) })).filter((item): item is WeightBand => item.price !== null);
         const continued = overIndex >= 0 ? parseContinuedRule(header, subheader, row, overIndex, fallbackThreshold) : null;
         if (bands.length || continued) {
           const destinationPriority = destinationText.includes('【') || destinationText.includes('[') ? 100 : 0;
-          rules.push({ destinations: splitDestinations(destinationText), destinationPriority, dateLabel: date.label, dateStart: date.start, dateEnd: date.end, bands, continued });
+          rules.push({ destinations: splitDestinations(destinationText), destinationPriority, conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '', dateLabel: date.label, dateStart: date.start, dateEnd: date.end, bands, continued });
         }
       }
       dataIndex += 1;
@@ -171,7 +186,7 @@ function parseLegacyBaseSheet(data: unknown[][]) {
   const header = data[0] ?? [];
   return data.slice(1).map((row) => {
     const parsed = parseGroupedRateRow(header, row, 2);
-    return { destinations: splitDestinations(row[0]), destinationPriority: 0, dateLabel: '', dateStart: null, dateEnd: null, ...parsed } satisfies BaseRateRule;
+    return { destinations: splitDestinations(row[0]), destinationPriority: 0, conditionLabel: '', dateLabel: '', dateStart: null, dateEnd: null, ...parsed } satisfies BaseRateRule;
   }).filter((rule) => rule.destinations.length && (rule.bands.length || rule.continued));
 }
 
@@ -211,6 +226,7 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
   const extraRules = parseExtraSheet(sheetMap.get('加收费用') ?? []);
   const periods = [...new Set(baseRules.map((rule) => rule.dateLabel).filter(Boolean))];
   const bandLabels = [...new Set(baseRules.flatMap((rule) => rule.bands.map((band) => `${band.upTo}kg`)))];
+  const conditionLabels = [...new Set(baseRules.map((rule) => rule.conditionLabel).filter(Boolean))];
   const warnings: string[] = [];
   for (const name of ['免收比率', '单量要求', '均重费用']) {
     if ((sheetMap.get(name)?.length ?? 0) > 1) warnings.push(`${name}需要整批账单统计，已识别但不参与单票试算`);
@@ -223,6 +239,7 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
     extraRules,
     periods,
     bandLabels,
+    conditionLabels,
     globalSettings: parseGlobalSettings(sheetMap.get('全局设置') ?? []),
     detectedSheets: sheets.map((sheet) => sheet.sheet),
     warnings,
@@ -238,8 +255,21 @@ function destinationSpecificity(ruleDestinations: string[], destination: string)
 }
 
 function dateMatches(rule: BaseRateRule, inputDate?: string) {
-  if (!inputDate || (!rule.dateStart && !rule.dateEnd)) return true;
+  if (!rule.dateStart && !rule.dateEnd) return true;
+  if (!inputDate) return false;
   return (!rule.dateStart || inputDate >= rule.dateStart) && (!rule.dateEnd || inputDate <= rule.dateEnd);
+}
+
+function conditionSpecificity(ruleCondition: string, inputCondition?: string) {
+  if (!ruleCondition) return 0;
+  if (!inputCondition?.trim()) return -1;
+  const normalize = (value: string) => value.toLowerCase().replace(/[\s_—–,，、;；/\\|()（）【】-]+/g, '').replaceAll('[', '').replaceAll(']', '');
+  const rule = normalize(ruleCondition);
+  const input = normalize(inputCondition);
+  if (!rule || !input) return -1;
+  if (rule === input) return 200 + rule.length;
+  if (rule.includes(input) || input.includes(rule)) return 100 + Math.min(rule.length, input.length);
+  return -1;
 }
 
 function evaluateRate(weight: number, bands: WeightBand[], continued: ContinuedRule | null) {
@@ -276,8 +306,19 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     const reason = destinationMatches.length ? `发货日期 ${input.date || '未填写'} 未命中报价生效期` : `报价中没有匹配目的地“${input.destination}”`;
     return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: reason };
   }
-  datedMatches.sort((a, b) => b.specificity - a.specificity || (b.rule.dateStart ?? '').localeCompare(a.rule.dateStart ?? ''));
-  const baseRule = datedMatches[0].rule;
+  const conditionedMatches = datedMatches.map((item) => ({ ...item, conditionSpecificity: conditionSpecificity(item.rule.conditionLabel ?? '', input.rateCondition) })).filter((item) => item.conditionSpecificity >= 0);
+  if (!conditionedMatches.length) {
+    const available = [...new Set(datedMatches.map((item) => item.rule.conditionLabel).filter(Boolean))].slice(0, 5);
+    const reason = input.rateCondition?.trim() ? `报价中没有匹配条件“${input.rateCondition}”` : `该目的地需要填写物流公司或报价条件${available.length ? `，例如：${available.join('、')}` : ''}`;
+    return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: reason };
+  }
+  conditionedMatches.sort((a, b) => b.conditionSpecificity - a.conditionSpecificity || b.specificity - a.specificity || (b.rule.dateStart ?? '').localeCompare(a.rule.dateStart ?? ''));
+  const top = conditionedMatches[0];
+  const tied = conditionedMatches.find((item, index) => index > 0 && item.conditionSpecificity === top.conditionSpecificity && item.specificity === top.specificity && item.rule.conditionLabel !== top.rule.conditionLabel);
+  if (tied && top.conditionSpecificity > 0) {
+    return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: `报价条件“${input.rateCondition}”同时命中“${top.rule.conditionLabel}”和“${tied.rule.conditionLabel}”，请填写更完整的物流公司或渠道名称` };
+  }
+  const baseRule = top.rule;
   const baseResult = evaluateRate(weight, baseRule.bands, baseRule.continued);
   if (!baseResult) {
     return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: `重量 ${weight}kg 超出已配置公斤段，且没有可用续重规则` };
@@ -290,6 +331,7 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
   const surcharge = round2(matchedExtras.reduce((sum, item) => sum + item.result.fee, 0));
   const total = applyTotalRounding(Math.max(0, baseFee + surcharge - prepaid), quote.globalSettings.totalRounding);
   const periodText = baseRule.dateLabel ? `命中 ${baseRule.dateLabel}` : '命中基础费用';
+  const conditionText = baseRule.conditionLabel ? `；条件：${baseRule.conditionLabel}` : '';
   const extraText = matchedExtras.length ? `；加收费：${matchedExtras.map((item) => item.rule.name).join('、')}` : '；无加收费';
   return {
     ...input,
@@ -300,6 +342,6 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     total,
     quoteName: quote.quoteName,
     status: 'ok',
-    explanation: `${periodText}；${weight.toFixed(2)}kg ${baseResult.explanation}${extraText}`,
+    explanation: `${periodText}${conditionText}；${weight.toFixed(2)}kg ${baseResult.explanation}${extraText}`,
   };
 }
