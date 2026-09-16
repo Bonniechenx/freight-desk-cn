@@ -28,6 +28,11 @@ export type ExtraRateRule = {
   name: string;
   destinations: string[];
   excludesDestinations: boolean;
+  destinationPriority?: number;
+  conditionLabel?: string;
+  dateLabel?: string;
+  dateStart?: string | null;
+  dateEnd?: string | null;
   bands: WeightBand[];
   continued: ContinuedRule | null;
 };
@@ -69,7 +74,18 @@ function number(value: unknown): number | null {
 }
 
 function normalizeDestination(value: string) {
-  return value.replace(/[【】()（）]/g, '').replaceAll('[', '').replaceAll(']', '').replace(/壮族自治区|维吾尔自治区|回族自治区|自治区|特别行政区|省|市|区|县|\s/g, '');
+  return value
+    .replace(/^(省|市|区|县|province|city|district)\s*[:：]/i, '')
+    .replace(/[【】()（）]/g, '').replaceAll('[', '').replaceAll(']', '')
+    .replace(/壮族自治区|维吾尔自治区|回族自治区|自治区|特别行政区|省|市|区|县|[\s+>/|]/g, '');
+}
+
+function destinationLevel(value: string) {
+  const target = value.trim();
+  if (/^(区|县|district)\s*[:：]/i.test(target) || target.endsWith('区') || target.endsWith('县')) return 300;
+  if (/^(市|city)\s*[:：]/i.test(target) || /[【[]/.test(target) || target.endsWith('市')) return 200;
+  if (/^(省|province)\s*[:：]/i.test(target) || target.endsWith('省') || target.endsWith('自治区') || target.endsWith('特别行政区')) return 100;
+  return 0;
 }
 
 function splitDestinations(value: unknown) {
@@ -145,8 +161,9 @@ function parseModernBaseSheet(data: unknown[][]) {
         const bands = bandColumns.map(({ index, limit }) => ({ upTo: limit, price: number(row[index]) })).filter((item): item is WeightBand => item.price !== null);
         const continued = overIndex >= 0 ? parseContinuedRule(header, subheader, row, overIndex, fallbackThreshold) : null;
         if (bands.length || continued) {
-          const destinationPriority = destinationText.includes('【') || destinationText.includes('[') ? 100 : 0;
-          rules.push({ destinations: splitDestinations(destinationText), destinationPriority, conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '', dateLabel: date.label, dateStart: date.start, dateEnd: date.end, bands, continued });
+          const destinations = splitDestinations(destinationText);
+          const destinationPriority = Math.max(0, ...destinations.map(destinationLevel));
+          rules.push({ destinations, destinationPriority, conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '', dateLabel: date.label, dateStart: date.start, dateEnd: date.end, bands, continued });
         }
       }
       dataIndex += 1;
@@ -193,16 +210,28 @@ function parseLegacyBaseSheet(data: unknown[][]) {
 function parseExtraSheet(data: unknown[][]) {
   if (data.length < 2) return [];
   const header = data[0] ?? [];
+  const nameIndex = header.findIndex((cell) => /收费名称|费用名称/.test(text(cell)));
+  const destinationIndex = header.findIndex((cell) => /目的地|收件地区|收货地区/.test(text(cell)));
+  const conditionIndex = header.findIndex((cell) => /附加条件|物流公司|计费渠道|报价条件/.test(text(cell)));
+  const dateIndex = header.findIndex((cell) => /生效日期|生效时间|有效期/.test(text(cell)));
+  const firstWeightIndex = header.findIndex((cell) => /^重量\d+/.test(text(cell)));
   return data.slice(1).map((row) => {
-    const destinationText = text(row[1]);
-    const parsed = parseGroupedRateRow(header, row, 3);
+    const destinationText = destinationIndex >= 0 ? text(row[destinationIndex]) : '';
+    const date = dateIndex >= 0 ? parseDateRange(row[dateIndex]) : { label: '', start: null, end: null };
+    const destinations = splitDestinations(destinationText).filter((item) => !/全部/.test(item));
+    const parsed = parseGroupedRateRow(header, row, firstWeightIndex >= 0 ? firstWeightIndex : 0);
     return {
-      name: text(row[0]) || '未命名加收费',
-      destinations: splitDestinations(destinationText),
+      name: text(row[nameIndex >= 0 ? nameIndex : 0]) || '未命名加收费',
+      destinations,
       excludesDestinations: destinationText.startsWith('【排除】'),
+      destinationPriority: Math.max(0, ...destinations.map(destinationLevel)),
+      conditionLabel: conditionIndex >= 0 ? text(row[conditionIndex]) : '',
+      dateLabel: date.label,
+      dateStart: date.start,
+      dateEnd: date.end,
       ...parsed,
     } satisfies ExtraRateRule;
-  }).filter((rule) => rule.destinations.length && (rule.bands.length || rule.continued));
+  }).filter((rule) => (rule.bands.length || rule.continued));
 }
 
 function parseGlobalSettings(data: unknown[][]): ImportedWorkbookQuote['globalSettings'] {
@@ -224,9 +253,9 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
   const baseRules = modernBase ? parseModernBaseSheet(modernBase) : legacyBase ? parseLegacyBaseSheet(legacyBase) : [];
   if (!baseRules.length) throw new Error('未识别到有效的“基础费用”Sheet，请保留目的地、公斤段和价格表头');
   const extraRules = parseExtraSheet(sheetMap.get('加收费用') ?? []);
-  const periods = [...new Set(baseRules.map((rule) => rule.dateLabel).filter(Boolean))];
+  const periods = [...new Set([...baseRules.map((rule) => rule.dateLabel), ...extraRules.map((rule) => rule.dateLabel ?? '')].filter(Boolean))];
   const bandLabels = [...new Set(baseRules.flatMap((rule) => rule.bands.map((band) => `${band.upTo}kg`)))];
-  const conditionLabels = [...new Set(baseRules.map((rule) => rule.conditionLabel).filter(Boolean))];
+  const conditionLabels = [...new Set([...baseRules.map((rule) => rule.conditionLabel), ...extraRules.map((rule) => rule.conditionLabel ?? '')].filter(Boolean))];
   const warnings: string[] = [];
   for (const name of ['免收比率', '单量要求', '均重费用']) {
     if ((sheetMap.get(name)?.length ?? 0) > 1) warnings.push(`${name}需要整批账单统计，已识别但不参与单票试算`);
@@ -250,11 +279,11 @@ function destinationSpecificity(ruleDestinations: string[], destination: string)
   const target = normalizeDestination(destination);
   return Math.max(...ruleDestinations.map((place) => {
     const normalized = normalizeDestination(place);
-    return normalized && target.includes(normalized) ? normalized.length : -1;
+    return normalized && target.includes(normalized) ? destinationLevel(place) + normalized.length : -1;
   }));
 }
 
-function dateMatches(rule: BaseRateRule, inputDate?: string) {
+function dateMatches(rule: { dateStart?: string | null; dateEnd?: string | null }, inputDate?: string) {
   if (!rule.dateStart && !rule.dateEnd) return true;
   if (!inputDate) return false;
   return (!rule.dateStart || inputDate >= rule.dateStart) && (!rule.dateEnd || inputDate <= rule.dateEnd);
@@ -324,11 +353,17 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     return { ...input, roundedWeight: 0, baseFee: 0, surcharge: 0, prepaid, total: 0, quoteName: quote.quoteName, status: 'error', explanation: `重量 ${weight}kg 超出已配置公斤段，且没有可用续重规则` };
   }
   const matchedExtras = quote.extraRules.map((rule) => {
-    const matched = destinationSpecificity(rule.destinations, input.destination) >= 0;
-    return { rule, applies: rule.excludesDestinations ? !matched : matched };
+    const destinationMatched = rule.destinations.length === 0 || destinationSpecificity(rule.destinations, input.destination) >= 0;
+    const destinationApplies = rule.excludesDestinations ? !destinationMatched : destinationMatched;
+    const conditionApplies = conditionSpecificity(rule.conditionLabel ?? '', input.rateCondition) >= 0;
+    return { rule, applies: destinationApplies && conditionApplies && dateMatches(rule, input.date) };
   }).filter((item) => item.applies).map(({ rule }) => ({ rule, result: evaluateRate(weight, rule.bands, rule.continued) })).filter((item) => item.result !== null) as Array<{ rule: ExtraRateRule; result: NonNullable<ReturnType<typeof evaluateRate>> }>;
   const baseFee = round2(baseResult.fee);
-  const surcharge = round2(matchedExtras.reduce((sum, item) => sum + item.result.fee, 0));
+  const surchargeDetails = matchedExtras.reduce<Record<string, number>>((details, item) => {
+    details[item.rule.name] = round2((details[item.rule.name] ?? 0) + item.result.fee);
+    return details;
+  }, {});
+  const surcharge = round2(Object.values(surchargeDetails).reduce((sum, fee) => sum + fee, 0));
   const total = applyTotalRounding(Math.max(0, baseFee + surcharge - prepaid), quote.globalSettings.totalRounding);
   const periodText = baseRule.dateLabel ? `命中 ${baseRule.dateLabel}` : '命中基础费用';
   const conditionText = baseRule.conditionLabel ? `；条件：${baseRule.conditionLabel}` : '';
@@ -338,6 +373,7 @@ export function calculateWorkbookFreight(input: ShipmentInput, quote: ImportedWo
     roundedWeight: baseResult.chargedWeight,
     baseFee,
     surcharge,
+    surchargeDetails,
     prepaid,
     total,
     quoteName: quote.quoteName,

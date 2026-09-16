@@ -38,6 +38,7 @@ export type FeeResult = ShipmentInput & {
   roundedWeight: number;
   baseFee: number;
   surcharge: number;
+  surchargeDetails?: Record<string, number>;
   prepaid: number;
   total: number;
   quoteName: string;
