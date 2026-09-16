@@ -28,6 +28,7 @@ export type ShipmentInput = {
   rateCondition?: string;
   customer?: string;
   store?: string;
+  settlementKey?: string;
   matchFields?: Record<string, string>;
   date?: string;
   sourceRow?: number;

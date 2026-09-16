@@ -2,7 +2,7 @@
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight, Boxes, Calculator, CheckCircle2, ChevronRight, CircleAlert,
+  ArrowDown, ArrowRight, ArrowUp, Boxes, Calculator, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert,
   Download, FileSpreadsheet, LayoutDashboard, MapPin, PackageCheck, Plus,
   ReceiptText, Save, Search, ShieldCheck, Store,
   Trash2, Upload, Weight,
@@ -12,6 +12,7 @@ import readXlsxFile, { readSheet } from 'read-excel-file/browser';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -23,19 +24,19 @@ import {
 } from '@/lib/quote-workbook';
 
 type View = 'single' | 'batch' | 'quotes' | 'bindings';
-type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number; conditions?: Record<string, string> };
+type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number; matchKey?: string; conditions?: Record<string, string> };
 
 const sampleShipments: ShipmentInput[] = [
-  { trackingNo: 'YT20260915001', destination: '广东省深圳市', weight: 0.86, store: '森屿旗舰店', customer: '森屿电商', matchFields: { 所属客户: '森屿电商', 店铺名称: '森屿旗舰店' }, date: '2026-09-15' },
-  { trackingNo: 'YT20260915002', destination: '浙江省杭州市', weight: 2.31, store: '森屿旗舰店', customer: '森屿电商', matchFields: { 所属客户: '森屿电商', 店铺名称: '森屿旗舰店' }, date: '2026-09-15' },
-  { trackingNo: 'YT20260915003', destination: '北京市朝阳区', weight: 3.26, store: '北辰专营店', customer: '北辰商贸', matchFields: { 所属客户: '北辰商贸', 店铺名称: '北辰专营店' }, date: '2026-09-15' },
-  { trackingNo: 'YT20260915004', destination: '新疆乌鲁木齐市', weight: 1.48, store: '云栈生活馆', customer: '云栈供应链', matchFields: { 所属客户: '云栈供应链', 店铺名称: '云栈生活馆' }, date: '2026-09-15' },
-  { trackingNo: 'YT20260915005', destination: '江苏省苏州市', weight: 5.08, store: '北辰专营店', customer: '北辰商贸', matchFields: { 所属客户: '北辰商贸', 店铺名称: '北辰专营店' }, date: '2026-09-15' },
+  { trackingNo: 'YT20260915001', destination: '广东省深圳市', weight: 0.86, store: '森屿旗舰店', customer: '森屿电商', settlementKey: '森屿电商+森屿旗舰店', date: '2026-09-15' },
+  { trackingNo: 'YT20260915002', destination: '浙江省杭州市', weight: 2.31, store: '森屿旗舰店', customer: '森屿电商', settlementKey: '森屿电商+森屿旗舰店', date: '2026-09-15' },
+  { trackingNo: 'YT20260915003', destination: '北京市朝阳区', weight: 3.26, store: '北辰专营店', customer: '北辰商贸', settlementKey: '北辰商贸+北辰专营店', date: '2026-09-15' },
+  { trackingNo: 'YT20260915004', destination: '新疆乌鲁木齐市', weight: 1.48, store: '云栈生活馆', customer: '云栈供应链', settlementKey: '云栈供应链+云栈生活馆', date: '2026-09-15' },
+  { trackingNo: 'YT20260915005', destination: '江苏省苏州市', weight: 5.08, store: '北辰专营店', customer: '北辰商贸', settlementKey: '北辰商贸+北辰专营店', date: '2026-09-15' },
 ];
 const initialBindings: Binding[] = [
-  { id: 'b1', store: '森屿旗舰店', customer: '森屿电商', quote: '默认客户报价', prepaid: 0, conditions: { 所属客户: '森屿电商', 店铺名称: '森屿旗舰店' } },
-  { id: 'b2', store: '北辰专营店', customer: '北辰商贸', quote: '默认客户报价', prepaid: 1, conditions: { 所属客户: '北辰商贸', 店铺名称: '北辰专营店' } },
-  { id: 'b3', store: '云栈生活馆', customer: '云栈供应链', quote: '默认客户报价', prepaid: 2, conditions: { 所属客户: '云栈供应链', 店铺名称: '云栈生活馆' } },
+  { id: 'b1', store: '森屿旗舰店', customer: '森屿电商', quote: '默认客户报价', prepaid: 0, matchKey: '森屿电商+森屿旗舰店' },
+  { id: 'b2', store: '北辰专营店', customer: '北辰商贸', quote: '默认客户报价', prepaid: 1, matchKey: '北辰商贸+北辰专营店' },
+  { id: 'b3', store: '云栈生活馆', customer: '云栈供应链', quote: '默认客户报价', prepaid: 2, matchKey: '云栈供应链+云栈生活馆' },
 ];
 
 export default function Home() {
@@ -140,15 +141,14 @@ function SingleCalculator({ pricing, surcharges, workbookQuotes, bindings, goBat
   const workbookQuote = matchedWorkbookQuote ?? (workbookQuotes.length === 1 && binding?.quote === pricing.quoteName ? workbookQuotes[0] : undefined);
   const activeQuoteName = workbookQuote?.quoteName ?? binding?.quote ?? pricing.quoteName;
   const result = useMemo(() => {
-    const matchFields = binding ? getBindingConditions(binding) : {};
-    const input: ShipmentInput = { trackingNo: '单票试算', destination, weight: Number(weight), quotePlan: activeQuoteName, customer: binding?.customer, store: binding?.store, matchFields, rateCondition, date };
+    const input: ShipmentInput = { trackingNo: '单票试算', destination, weight: Number(weight), quotePlan: activeQuoteName, customer: binding?.customer, store: binding?.store, settlementKey: binding ? getBindingKey(binding) : '', rateCondition, date };
     if (binding && workbookQuotes.length && !workbookQuote) return feeError(input, activeQuoteName, `条件组合已指定报价“${activeQuoteName}”，但该报价尚未导入`);
     return workbookQuote ? calculateWorkbookFreight(input, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(input, pricing, surcharges, binding?.prepaid ?? 0);
   }, [destination, weight, rateCondition, date, pricing, surcharges, workbookQuote, workbookQuotes.length, binding, activeQuoteName]);
 
   return (
     <>
-      <PageIntro eyebrow={`${activeQuoteName} · 当前生效`} title="输入计费条件，立即解释价格" description="先按店铺确定报价表，再匹配物流公司或渠道、生效日期、目的地、公斤段和加收费。" action={<Button onClick={goBatch} className="h-10 bg-[#0d7f75] px-4 text-white hover:bg-[#0a6d65]">进入批量核算 <ChevronRight /></Button>} />
+      <PageIntro eyebrow={`${activeQuoteName} · 当前生效`} title="输入计费条件，立即解释价格" description="先按结算条件组合值确定报价表，再匹配物流公司或渠道、生效日期、目的地、公斤段和加收费。" action={<Button onClick={goBatch} className="h-10 bg-[#0d7f75] px-4 text-white hover:bg-[#0a6d65]">进入批量核算 <ChevronRight /></Button>} />
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,.75fr)]">
         <Panel title="计费条件" description={workbookQuote ? `${workbookQuote.periods.length || 1} 个生效期，${workbookQuote.bandLabels.length} 个表头公斤段` : `首重 ${pricing.firstWeight}kg / ¥${pricing.firstPrice}，续重 ${pricing.continuedStep}kg / ¥${pricing.continuedPrice}`}>
           <div className="grid gap-5 p-5 md:grid-cols-2 md:p-6">
@@ -175,7 +175,7 @@ type BatchColumnMapping = {
   trackingNo: string;
   store: string;
   date: string;
-  bindingConditions: Record<string, string>;
+  settlementColumns: string[];
 };
 
 type PendingBatchImport = {
@@ -185,7 +185,6 @@ type PendingBatchImport = {
 };
 
 function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuotes: ImportedWorkbookQuote[]; bindings: Binding[] }) {
-  const bindingConditionKeys = getBindingConditionKeys(bindings);
   const [rows, setRows] = useState<ShipmentInput[]>(sampleShipments);
   const [fileName, setFileName] = useState('示例账单.xlsx');
   const [search, setSearch] = useState('');
@@ -193,10 +192,10 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
   const [message, setMessage] = useState('已载入示例数据，可直接查看计算结果');
   const [mappingError, setMappingError] = useState('');
   const [pendingImport, setPendingImport] = useState<PendingBatchImport | null>(null);
-  const [mapping, setMapping] = useState<BatchColumnMapping>(() => emptyBatchMapping(bindingConditionKeys));
+  const [mapping, setMapping] = useState<BatchColumnMapping>(() => emptyBatchMapping());
   const fileRef = useRef<HTMLInputElement>(null);
   const results = useMemo(() => rows.map((row) => {
-    const resolved = resolveBinding(bindings, row.matchFields ?? legacyMatchFields(row));
+    const resolved = resolveBinding(bindings, row.settlementKey || legacySettlementKey(row));
     if (bindings.length && resolved.error) return feeError(row, row.quotePlan || '未匹配报价', `原表第 ${row.sourceRow ?? '—'} 行${resolved.error}`);
     const binding = resolved.binding;
     if (binding && row.quotePlan && !quoteNamesMatch(row.quotePlan, binding.quote)) return feeError(row, binding.quote, `账单报价“${row.quotePlan}”与条件组合指定报价“${binding.quote}”不一致`, binding.prepaid);
@@ -207,7 +206,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
     const calculatedInput = { ...row, quotePlan: requestedQuote, customer: row.customer || binding?.customer, store: row.store || binding?.store };
     return workbookQuote ? calculateWorkbookFreight(calculatedInput, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(calculatedInput, pricing, surcharges, binding?.prepaid ?? 0);
   }), [rows, pricing, surcharges, workbookQuotes, bindings]);
-  const filtered = results.filter((row) => [row.trackingNo, row.destination, row.store, row.customer, row.quotePlan, row.rateCondition, ...Object.values(row.matchFields ?? {})].some((value) => String(value ?? '').toLowerCase().includes(search.toLowerCase())));
+  const filtered = results.filter((row) => [row.trackingNo, row.destination, row.store, row.customer, row.quotePlan, row.rateCondition, row.settlementKey].some((value) => String(value ?? '').toLowerCase().includes(search.toLowerCase())));
   const total = results.reduce((sum, row) => sum + row.total, 0);
   const errors = results.filter((row) => row.status === 'error').length;
   const columnOptions = pendingImport ? getColumnOptions(pendingImport.grid, pendingImport.headerRow) : [];
@@ -223,7 +222,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
       if (grid.length < 2) throw new Error('表格中没有足够的数据行');
       const headerRow = detectHeaderRow(grid);
       setPendingImport({ fileName: file.name, grid, headerRow });
-      setMapping(inferBatchMapping(grid, headerRow, bindingConditionKeys));
+      setMapping(inferBatchMapping(grid, headerRow));
       setMappingError('');
       setMessage(`已读取 ${file.name}，请选择各字段所在列`);
     } catch (error) { setMessage(error instanceof Error ? error.message : '文件解析失败'); }
@@ -234,7 +233,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
     if (!pendingImport) return;
     const headerRow = Number(value);
     setPendingImport({ ...pendingImport, headerRow });
-    setMapping(inferBatchMapping(pendingImport.grid, headerRow, bindingConditionKeys));
+    setMapping(inferBatchMapping(pendingImport.grid, headerRow));
     setMappingError('');
   };
 
@@ -243,18 +242,21 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
     const requiresRateCondition = workbookQuotes.some((quote) => (quote.conditionLabels?.length ?? 0) > 0);
     const requiresDate = workbookQuotes.some((quote) => (quote.periods?.length ?? 0) > 0);
     const requiresQuotePlan = bindings.length === 0;
-    const relationColumns = bindingConditionKeys.map((key) => mapping.bindingConditions[key] ?? '');
-    const required = [mapping.destination, mapping.weight, ...(requiresQuotePlan ? [mapping.quotePlan] : []), ...(requiresRateCondition ? [mapping.rateCondition] : []), ...(requiresDate ? [mapping.date] : []), ...relationColumns];
+    const required = [mapping.destination, mapping.weight, ...(requiresQuotePlan ? [mapping.quotePlan] : []), ...(requiresRateCondition ? [mapping.rateCondition] : []), ...(requiresDate ? [mapping.date] : [])];
     if (required.some((value) => value === '')) {
-      const extras = [requiresQuotePlan ? '报价方案' : '', requiresRateCondition ? '物流公司/报价条件' : '', requiresDate ? '发货日期' : '', ...bindingConditionKeys].filter(Boolean).join('、');
+      const extras = [requiresQuotePlan ? '报价方案' : '', requiresRateCondition ? '物流公司/报价条件' : '', requiresDate ? '发货日期' : ''].filter(Boolean).join('、');
       setMappingError(`请先选择目的地、重量${extras ? `、${extras}` : ''}列`);
+      return;
+    }
+    if (bindings.length && !mapping.settlementColumns.length) {
+      setMappingError('请在一个选项框中至少选择一列结算条件');
       return;
     }
     if (mapping.destination === mapping.weight) {
       setMappingError('目的地和重量不能选择同一列');
       return;
     }
-    const parsed = gridToMappedShipments(pendingImport.grid, pendingImport.headerRow, mapping, bindingConditionKeys);
+    const parsed = gridToMappedShipments(pendingImport.grid, pendingImport.headerRow, mapping);
     if (!parsed.length) {
       setMappingError('所选列下方没有可导入的数据');
       return;
@@ -267,14 +269,14 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
   };
 
   const download = () => {
-    const headers = ['原表行号', '运单号', '目的地', '重量kg', '计费重量kg', '组合匹配条件', '物流公司/报价条件', '日期', '账单报价方案', '实际使用报价', '基础费用', '附加费', '面单抵扣', '合计运费', '状态', '计算说明'];
-    const data = results.map((row) => [row.sourceRow ?? '', row.trackingNo, row.destination, row.weight, row.roundedWeight, formatMatchFields(row.matchFields), row.rateCondition ?? '', row.date ?? '', row.quotePlan ?? '', row.quoteName, row.baseFee, row.surcharge, row.prepaid, row.total, row.status === 'ok' ? '成功' : '异常', row.explanation]);
+    const headers = ['原表行号', '运单号', '目的地', '重量kg', '计费重量kg', '结算条件组合值', '物流公司/报价条件', '日期', '账单报价方案', '实际使用报价', '基础费用', '附加费', '面单抵扣', '合计运费', '状态', '计算说明'];
+    const data = results.map((row) => [row.sourceRow ?? '', row.trackingNo, row.destination, row.weight, row.roundedWeight, row.settlementKey ?? '', row.rateCondition ?? '', row.date ?? '', row.quotePlan ?? '', row.quoteName, row.baseFee, row.surcharge, row.prepaid, row.total, row.status === 'ok' ? '成功' : '异常', row.explanation]);
     downloadCsv('运费核算结果.csv', [headers, ...data]);
   };
 
   return (
     <>
-      <PageIntro eyebrow="任意表头均可导入" title="上传账单后，由你指定计费列" description="你配置的全部结算条件会同时匹配并选出报价；随后再按报价内部条件、日期、目的地和重量计算。" action={<><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importFile} /><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{loading ? '正在读取' : '导入账单'}</Button></>} />
+      <PageIntro eyebrow="任意表头均可导入" title="上传账单后，由你指定计费列" description="在一个选项框中按顺序选择多个结算列，系统会把每行的列值组合后匹配报价；随后再按报价内部条件、日期、目的地和重量计算。" action={<><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importFile} /><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{loading ? '正在读取' : '导入账单'}</Button></>} />
       {pendingImport && <section className="mb-5 overflow-hidden rounded-2xl border border-teal-200 bg-white shadow-[0_14px_44px_rgba(15,23,42,.06)]">
         <div className="flex flex-col gap-3 border-b border-teal-100 bg-teal-50/70 p-5 md:flex-row md:items-center md:justify-between"><div><p className="text-xs font-semibold text-teal-700">已读取原始账单</p><h3 className="mt-1 font-semibold">{pendingImport.fileName}</h3><p className="mt-1 text-xs text-muted-foreground">原表不会被修改。报价方案值会与“报价管理”中已启用的报价匹配。</p></div><Button variant="ghost" onClick={() => setPendingImport(null)}>取消本次导入</Button></div>
         <div className="grid gap-4 p-5 lg:grid-cols-4">
@@ -282,7 +284,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
           <MappingSelect required label="目的地列" value={mapping.destination} setValue={(value) => setMapping({ ...mapping, destination: value })} options={columnOptions} />
           <MappingSelect required label="重量列" value={mapping.weight} setValue={(value) => setMapping({ ...mapping, weight: value })} options={columnOptions} />
           <MappingSelect required={bindings.length === 0} label={`报价方案列${bindings.length ? '（可选校验）' : ''}`} value={mapping.quotePlan} setValue={(value) => setMapping({ ...mapping, quotePlan: value })} options={columnOptions} optional={bindings.length > 0} />
-          {bindingConditionKeys.map((key) => <MappingSelect key={key} required label={`结算条件：${key}`} value={mapping.bindingConditions[key] ?? ''} setValue={(value) => setMapping({ ...mapping, bindingConditions: { ...mapping.bindingConditions, [key]: value } })} options={columnOptions} />)}
+          <OrderedMultiColumnSelect required={bindings.length > 0} label="结算组合列（按选择顺序匹配）" values={mapping.settlementColumns} setValues={(values) => setMapping({ ...mapping, settlementColumns: values })} options={columnOptions} />
           <MappingSelect required={workbookQuotes.some((quote) => (quote.conditionLabels?.length ?? 0) > 0)} label="物流公司 / 报价条件列" value={mapping.rateCondition} setValue={(value) => setMapping({ ...mapping, rateCondition: value })} options={columnOptions} optional={!workbookQuotes.some((quote) => (quote.conditionLabels?.length ?? 0) > 0)} />
           <MappingSelect label="运单号列（可选）" value={mapping.trackingNo} setValue={(value) => setMapping({ ...mapping, trackingNo: value })} options={columnOptions} optional />
           <MappingSelect label="店铺列（可选）" value={mapping.store} setValue={(value) => setMapping({ ...mapping, store: value })} options={columnOptions} optional />
@@ -290,7 +292,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
           <div className="flex items-end"><Button onClick={applyMapping} className="h-10 w-full bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Calculator />按所选列开始计算</Button></div>
         </div>
         {mappingError && <div className="border-t border-rose-100 bg-rose-50 px-5 py-3 text-sm text-rose-700"><CircleAlert className="mr-2 inline size-4" />{mappingError}</div>}
-        <div className="overflow-x-auto border-t"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>原表行</TableHead><TableHead>目的地预览</TableHead><TableHead>重量预览</TableHead><TableHead>组合条件预览</TableHead><TableHead>报价条件预览</TableHead></TableRow></TableHeader><TableBody>{previewRows.map((item) => <TableRow key={item.sourceRow}><TableCell className="text-muted-foreground">{item.sourceRow}</TableCell><TableCell>{cellPreview(item.row, mapping.destination)}</TableCell><TableCell>{cellPreview(item.row, mapping.weight)}</TableCell><TableCell>{bindingConditionKeys.length ? bindingConditionKeys.map((key) => `${key}=${mapping.bindingConditions[key] === '' ? '请选择列' : cellText(item.row[Number(mapping.bindingConditions[key])]) || '空白'}`).join('；') : cellPreview(item.row, mapping.quotePlan)}</TableCell><TableCell>{cellPreview(item.row, mapping.rateCondition)}</TableCell></TableRow>)}</TableBody></Table></div>
+        <div className="overflow-x-auto border-t"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>原表行</TableHead><TableHead>目的地预览</TableHead><TableHead>重量预览</TableHead><TableHead>组合值预览</TableHead><TableHead>报价条件预览</TableHead></TableRow></TableHeader><TableBody>{previewRows.map((item) => <TableRow key={item.sourceRow}><TableCell className="text-muted-foreground">{item.sourceRow}</TableCell><TableCell>{cellPreview(item.row, mapping.destination)}</TableCell><TableCell>{cellPreview(item.row, mapping.weight)}</TableCell><TableCell>{mapping.settlementColumns.length ? combineSettlementValues(mapping.settlementColumns.map((column) => cellText(item.row[Number(column)]))) || <span className="text-muted-foreground">空白</span> : <span className="text-amber-600">请选择组合列</span>}</TableCell><TableCell>{cellPreview(item.row, mapping.rateCondition)}</TableCell></TableRow>)}</TableBody></Table></div>
       </section>}
       <section className="grid gap-4 md:grid-cols-3"><Metric label="账单行数" value={String(results.length)} unit="票" trend={fileName} /><Metric label="预计应收" value={`¥${total.toFixed(2)}`} unit="" trend="逐票汇总" /><Metric label="异常待复核" value={String(errors)} unit="票" trend={errors ? '请检查原始列' : '全部通过'} warning={errors > 0} /></section>
       <section className="mt-5 overflow-hidden rounded-2xl border bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]">
@@ -299,8 +301,8 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindings }: { pr
           <div className="flex gap-2"><div className="relative min-w-0 flex-1 md:w-64"><Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索运单、地区或店铺" className="pl-8" /></div><Button variant="outline" onClick={download}><Download />导出 CSV</Button></div>
         </div>
         <Table>
-          <TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead>匹配条件</TableHead><TableHead>所用报价</TableHead><TableHead>报价内部条件</TableHead><TableHead className="text-right">原重 / 计费重</TableHead><TableHead className="text-right">基础费</TableHead><TableHead className="text-right">附加费</TableHead><TableHead className="text-right">抵扣</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
-          <TableBody>{filtered.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`} title={row.explanation}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell className="max-w-72 text-xs text-muted-foreground">{formatMatchFields(row.matchFields) || '—'}</TableCell><TableCell>{row.quoteName}</TableCell><TableCell>{row.rateCondition || '—'}</TableCell><TableCell className="text-right"><span className="text-muted-foreground">{row.weight}</span><ArrowRight className="mx-1 inline size-3" />{row.roundedWeight}</TableCell><TableCell className="text-right">¥{row.baseFee.toFixed(2)}</TableCell><TableCell className="text-right">¥{row.surcharge.toFixed(2)}</TableCell><TableCell className="text-right text-amber-700">-¥{row.prepaid.toFixed(2)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody>
+          <TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead>结算组合值</TableHead><TableHead>所用报价</TableHead><TableHead>报价内部条件</TableHead><TableHead className="text-right">原重 / 计费重</TableHead><TableHead className="text-right">基础费</TableHead><TableHead className="text-right">附加费</TableHead><TableHead className="text-right">抵扣</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
+          <TableBody>{filtered.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`} title={row.explanation}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell className="max-w-72 text-xs text-muted-foreground">{row.settlementKey || '—'}</TableCell><TableCell>{row.quoteName}</TableCell><TableCell>{row.rateCondition || '—'}</TableCell><TableCell className="text-right"><span className="text-muted-foreground">{row.weight}</span><ArrowRight className="mx-1 inline size-3" />{row.roundedWeight}</TableCell><TableCell className="text-right">¥{row.baseFee.toFixed(2)}</TableCell><TableCell className="text-right">¥{row.surcharge.toFixed(2)}</TableCell><TableCell className="text-right text-amber-700">-¥{row.prepaid.toFixed(2)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody>
         </Table>
         {!filtered.length && <div className="p-10 text-center text-sm text-muted-foreground">没有符合搜索条件的账单</div>}
       </section>
@@ -380,22 +382,19 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQ
 
 function BindingsEditor({ bindings, setBindings, quoteNames }: { bindings: Binding[]; setBindings: (value: Binding[]) => void; quoteNames: string[] }) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState({ store: '', customer: '', quote: quoteNames[0] ?? '', prepaid: '0' });
+  const [draft, setDraft] = useState({ matchKey: '', quote: quoteNames[0] ?? '', prepaid: '0' });
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState(false);
   const [importing, setImporting] = useState(false);
   const add = () => {
-    if (!draft.store.trim() || !draft.customer.trim()) return;
-    const conditions = { 所属客户: draft.customer.trim(), 店铺名称: draft.store.trim() };
-    if (bindings.some((binding) => bindingConditionsEqual(getBindingConditions(binding), conditions))) return;
-    setBindings([...bindings, { id: crypto.randomUUID(), store: draft.store.trim(), customer: draft.customer.trim(), quote: draft.quote || quoteNames[0] || '', prepaid: Number(draft.prepaid) || 0, conditions }]);
-    setDraft({ store: '', customer: '', quote: draft.quote || quoteNames[0] || '', prepaid: '0' });
+    const matchKey = cleanSettlementKey(draft.matchKey);
+    if (!matchKey || bindings.some((binding) => settlementKeysEqual(getBindingKey(binding), matchKey))) return;
+    setBindings([...bindings, { id: crypto.randomUUID(), store: '', customer: '', quote: draft.quote || quoteNames[0] || '', prepaid: Number(draft.prepaid) || 0, matchKey }]);
+    setDraft({ matchKey: '', quote: draft.quote || quoteNames[0] || '', prepaid: '0' });
   };
   const downloadTemplate = () => {
-    const conditionKeys = getBindingConditionKeys(bindings);
-    const keys = conditionKeys.length ? conditionKeys : ['所属客户', '店铺名称'];
-    const rows = bindings.length ? bindings.map((item) => [...keys.map((key) => getBindingConditions(item)[key] ?? ''), item.quote, item.prepaid]) : [['示例客户', '示例旗舰店', quoteNames[0] ?? '', 0]];
-    downloadCsv('多条件报价结算关系模板.csv', [[...keys, '所用报价', '预付面单费'], ...rows]);
+    const rows = bindings.length ? bindings.map((item) => [getBindingKey(item), item.quote, item.prepaid]) : [['示例客户+示例旗舰店', quoteNames[0] ?? '', 0]];
+    downloadCsv('组合值报价结算关系模板.csv', [['结算条件组合值', '所用报价', '预付面单费'], ...rows]);
   };
   const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -418,24 +417,23 @@ function BindingsEditor({ bindings, setBindings, quoteNames }: { bindings: Bindi
   };
   return (
     <>
-      <PageIntro eyebrow="全部条件同时命中才选择报价" title="自由组合报价匹配条件" description="模板中除“所用报价”和“预付面单费”外，其余列都会成为匹配条件；列名和条件数量由你决定。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载当前条件模板</Button><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{importing ? '正在导入' : '导入多条件关系'}</Button></div>} />
+      <PageIntro eyebrow="组合值完全一致才选择报价" title="按选列顺序维护报价关系" description="批量账单按你选择列的先后顺序生成组合值。例如先选 A、再选 B，就用 A值+B值匹配模板中的同一列。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" onChange={importTemplate} /><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载组合值模板</Button><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{importing ? '正在导入' : '导入组合值关系'}</Button></div>} />
       <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
         <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
-        <div><p className="font-semibold">多条件模板规则</p><p className="mt-1 text-xs leading-5 text-sky-800">支持 XLSX、XLS 和 CSV。“所用报价/报价名称”和“预付面单费”是结果列；其他非空表头全部作为条件列。相同条件组合只能出现一次，报价名称必须来自已导入报价。</p></div>
+        <div><p className="font-semibold">组合值模板规则</p><p className="mt-1 text-xs leading-5 text-sky-800">模板固定为“结算条件组合值、所用报价、预付面单费”三列。组合值的顺序必须与批量核算页的选列顺序一致。旧版多条件模板仍可导入，系统会按原表从左到右自动合并。</p></div>
       </div>
       {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       <section className="grid gap-5 xl:grid-cols-[360px_1fr]">
-        <Panel title="快速新增（客户 + 店铺）" description="更多自定义条件请通过模板导入">
+        <Panel title="快速新增组合值" description="多个值用 + 连接，顺序与账单选列一致">
           <div className="space-y-4 p-5">
-            <TextControl label="店铺名称" value={draft.store} setValue={(value) => setDraft({ ...draft, store: value })} placeholder="例如：森屿抖音店" />
-            <TextControl label="所属客户" value={draft.customer} setValue={(value) => setDraft({ ...draft, customer: value })} placeholder="例如：森屿电商" />
+            <TextControl label="结算条件组合值" value={draft.matchKey} setValue={(value) => setDraft({ ...draft, matchKey: value })} placeholder="例如：森屿电商+森屿抖音店" />
             <label className="space-y-2"><span className="text-xs font-semibold text-slate-600">所用报价</span><NativeSelect value={draft.quote} onChange={(event) => setDraft({ ...draft, quote: event.target.value })} className="h-10">{quoteNames.map((name) => <NativeSelectOption key={name} value={name}>{name}</NativeSelectOption>)}</NativeSelect></label>
             <NumberControl label="预付面单费" value={draft.prepaid} setValue={(value) => setDraft({ ...draft, prepaid: value })} unit="元" />
             <Button onClick={add} className="h-10 w-full bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Plus />添加绑定</Button>
           </div>
         </Panel>
-        <Panel title="组合匹配关系" description={`${bindings.length} 条规则，${getBindingConditionKeys(bindings).length} 个条件字段`}>
-          <Table><TableHeader><TableRow className="bg-slate-50"><TableHead>匹配条件组合</TableHead><TableHead>所用报价</TableHead><TableHead className="text-right">面单抵扣</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{bindings.map((item) => <TableRow key={item.id}><TableCell><div className="flex flex-wrap gap-1.5">{Object.entries(getBindingConditions(item)).map(([key, value]) => <span key={key} className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700"><span className="text-slate-500">{key}：</span>{value}</span>)}</div></TableCell><TableCell><Status ok>{item.quote}</Status></TableCell><TableCell className="text-right">¥{item.prepaid.toFixed(2)}</TableCell><TableCell><Button variant="ghost" size="icon-sm" aria-label="删除绑定" onClick={() => setBindings(bindings.filter((binding) => binding.id !== item.id))}><Trash2 className="text-rose-600" /></Button></TableCell></TableRow>)}</TableBody></Table>
+        <Panel title="组合匹配关系" description={`${bindings.length} 条组合值规则`}>
+          <Table><TableHeader><TableRow className="bg-slate-50"><TableHead>结算条件组合值</TableHead><TableHead>所用报价</TableHead><TableHead className="text-right">面单抵扣</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{bindings.map((item) => <TableRow key={item.id}><TableCell><span className="rounded-md bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700">{getBindingKey(item)}</span></TableCell><TableCell><Status ok>{item.quote}</Status></TableCell><TableCell className="text-right">¥{item.prepaid.toFixed(2)}</TableCell><TableCell><Button variant="ghost" size="icon-sm" aria-label="删除绑定" onClick={() => setBindings(bindings.filter((binding) => binding.id !== item.id))}><Trash2 className="text-rose-600" /></Button></TableCell></TableRow>)}</TableBody></Table>
         </Panel>
       </section>
     </>
@@ -476,6 +474,19 @@ function NumberControl({ label, value, setValue, unit }: { label: string; value:
 
 function MappingSelect({ label, value, setValue, options, required, optional }: { label: string; value: string; setValue: (value: string) => void; options: { value: string; label: string }[]; required?: boolean; optional?: boolean }) {
   return <label className="space-y-2"><span className="text-xs font-semibold text-slate-600">{label}{required && <span className="ml-1 text-rose-500">*</span>}</span><NativeSelect value={value} onChange={(event) => setValue(event.target.value)} className="h-10 bg-white"><NativeSelectOption value="">{optional ? '不使用此列' : '请选择一列'}</NativeSelectOption>{options.map((option) => <NativeSelectOption key={option.value} value={option.value}>{option.label}</NativeSelectOption>)}</NativeSelect></label>;
+}
+
+function OrderedMultiColumnSelect({ label, values, setValues, options, required }: { label: string; values: string[]; setValues: (values: string[]) => void; options: { value: string; label: string }[]; required?: boolean }) {
+  const selectedOptions = values.map((value) => options.find((option) => option.value === value)).filter((option): option is { value: string; label: string } => Boolean(option));
+  const toggle = (value: string) => setValues(values.includes(value) ? values.filter((item) => item !== value) : [...values, value]);
+  const move = (index: number, offset: number) => {
+    const target = index + offset;
+    if (target < 0 || target >= values.length) return;
+    const next = [...values];
+    [next[index], next[target]] = [next[target], next[index]];
+    setValues(next);
+  };
+  return <div className="space-y-2 lg:col-span-2"><span className="text-xs font-semibold text-slate-600">{label}{required && <span className="ml-1 text-rose-500">*</span>}</span><Popover><PopoverTrigger className="flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-input bg-white px-3 py-2 text-left text-sm outline-none transition hover:bg-slate-50 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"><span className={selectedOptions.length ? 'min-w-0 truncate text-slate-800' : 'text-muted-foreground'}>{selectedOptions.length ? selectedOptions.map((option, index) => `${index + 1}. ${option.label.split('（例：')[0]}`).join(' + ') : '请选择一列或多列'}</span><ChevronDown className="size-4 shrink-0 text-muted-foreground" /></PopoverTrigger><PopoverContent align="start" className="w-[min(92vw,480px)] gap-0 p-0"><div className="border-b px-3 py-2.5"><p className="text-sm font-semibold">按顺序选择结算列</p><p className="mt-1 text-xs text-muted-foreground">点选顺序就是组合顺序，也可用箭头调整。</p></div>{selectedOptions.length > 0 && <div className="border-b bg-teal-50/60 p-2"><p className="px-1 pb-1 text-[11px] font-semibold text-teal-800">当前顺序</p>{selectedOptions.map((option, index) => <div key={option.value} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-teal-700 text-[11px] font-semibold text-white">{index + 1}</span><span className="min-w-0 flex-1 truncate">{option.label}</span><button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label={`上移${option.label}`} className="rounded p-1 text-slate-500 hover:bg-white disabled:opacity-25"><ArrowUp className="size-3.5" /></button><button type="button" onClick={() => move(index, 1)} disabled={index === selectedOptions.length - 1} aria-label={`下移${option.label}`} className="rounded p-1 text-slate-500 hover:bg-white disabled:opacity-25"><ArrowDown className="size-3.5" /></button></div>)}</div>}<div className="max-h-64 overflow-y-auto p-1.5">{options.map((option) => { const selectedIndex = values.indexOf(option.value); return <button type="button" key={option.value} onClick={() => toggle(option.value)} className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm ${selectedIndex >= 0 ? 'bg-emerald-50 text-emerald-900' : 'hover:bg-slate-50'}`}><span className={`grid size-5 shrink-0 place-items-center rounded border ${selectedIndex >= 0 ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 text-transparent'}`}>{selectedIndex >= 0 ? <span className="text-[11px] font-semibold">{selectedIndex + 1}</span> : <Check className="size-3" />}</span><span className="min-w-0 flex-1 truncate">{option.label}</span></button>; })}</div></PopoverContent></Popover><p className="text-[11px] leading-4 text-muted-foreground">示例：先选 A，再选 B，组合值为 A值+B值；A+B 与 A+C 是两种不同关系。</p></div>;
 }
 
 function PriceRow({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
@@ -540,11 +551,11 @@ function getColumnOptions(grid: unknown[][], headerRow: number) {
   });
 }
 
-function emptyBatchMapping(conditionKeys: string[]): BatchColumnMapping {
-  return { destination: '', weight: '', quotePlan: '', rateCondition: '', trackingNo: '', store: '', date: '', bindingConditions: Object.fromEntries(conditionKeys.map((key) => [key, ''])) };
+function emptyBatchMapping(): BatchColumnMapping {
+  return { destination: '', weight: '', quotePlan: '', rateCondition: '', trackingNo: '', store: '', date: '', settlementColumns: [] };
 }
 
-function inferBatchMapping(grid: unknown[][], headerRow: number, conditionKeys: string[]): BatchColumnMapping {
+function inferBatchMapping(grid: unknown[][], headerRow: number): BatchColumnMapping {
   const headers = (grid[headerRow] ?? []).map((cell) => cellText(cell).toLowerCase());
   const find = (patterns: RegExp[]) => {
     const index = headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
@@ -558,17 +569,10 @@ function inferBatchMapping(grid: unknown[][], headerRow: number, conditionKeys: 
     trackingNo: find([/运单号/, /快递单号/, /物流单号/, /tracking/]),
     store: find([/店铺/, /客户/, /结算对象/, /store/]),
     date: find([/发货日期/, /揽收时间/, /账单日期/, /日期/, /date/]),
-    bindingConditions: {},
+    settlementColumns: [] as string[],
   };
-  mapping.bindingConditions = Object.fromEntries(conditionKeys.map((key) => {
-    const normalizedKey = normalizeHeader(key);
-    const exact = headers.findIndex((header) => normalizeHeader(header) === normalizedKey);
-    const partial = exact >= 0 ? exact : headers.findIndex((header) => {
-      const normalizedHeader = normalizeHeader(header);
-      return normalizedHeader && (normalizedHeader.includes(normalizedKey) || normalizedKey.includes(normalizedHeader));
-    });
-    return [key, partial < 0 ? '' : String(partial)];
-  }));
+  const combinedColumn = find([/结算条件组合值/, /组合匹配值/, /结算组合值/]);
+  mapping.settlementColumns = combinedColumn ? [combinedColumn] : [];
   return mapping;
 }
 
@@ -579,7 +583,7 @@ function parseWeightCell(value: unknown) {
   return matched ? Number(matched[0]) : Number.NaN;
 }
 
-function gridToMappedShipments(grid: unknown[][], headerRow: number, mapping: BatchColumnMapping, conditionKeys: string[]): ShipmentInput[] {
+function gridToMappedShipments(grid: unknown[][], headerRow: number, mapping: BatchColumnMapping): ShipmentInput[] {
   const indexOf = (value: string) => value === '' ? -1 : Number(value);
   const destination = indexOf(mapping.destination);
   const weight = indexOf(mapping.weight);
@@ -588,19 +592,17 @@ function gridToMappedShipments(grid: unknown[][], headerRow: number, mapping: Ba
   const trackingNo = indexOf(mapping.trackingNo);
   const store = indexOf(mapping.store);
   const date = indexOf(mapping.date);
-  return grid.slice(headerRow + 1).map((row, index) => ({ row, sourceRow: headerRow + index + 2 })).filter(({ row }) => rowHasValue(row) && [destination, weight, quotePlan, ...conditionKeys.map((key) => indexOf(mapping.bindingConditions[key] ?? ''))].some((column) => column >= 0 && cellText(row[column]) !== '')).map(({ row, sourceRow }) => {
-    const matchFields = Object.fromEntries(conditionKeys.map((key) => [key, cellText(row[indexOf(mapping.bindingConditions[key] ?? '')])]));
-    const storeCondition = Object.entries(matchFields).find(([key]) => /店铺|门店/.test(key));
-    const customerCondition = Object.entries(matchFields).find(([key]) => /客户|货主/.test(key));
+  const settlementColumns = mapping.settlementColumns.map(Number);
+  return grid.slice(headerRow + 1).map((row, index) => ({ row, sourceRow: headerRow + index + 2 })).filter(({ row }) => rowHasValue(row) && [destination, weight, quotePlan, ...settlementColumns].some((column) => column >= 0 && cellText(row[column]) !== '')).map(({ row, sourceRow }) => {
+    const settlementKey = combineSettlementValues(settlementColumns.map((column) => cellText(row[column])));
     return {
       trackingNo: trackingNo >= 0 ? cellText(row[trackingNo]) || `ROW-${sourceRow}` : `ROW-${sourceRow}`,
       destination: cellText(row[destination]),
       weight: parseWeightCell(row[weight]),
       quotePlan: quotePlan >= 0 ? cellText(row[quotePlan]) : '',
       rateCondition: rateCondition >= 0 ? cellText(row[rateCondition]) : '',
-      customer: customerCondition?.[1] ?? '',
-      store: storeCondition?.[1] || (store >= 0 ? cellText(row[store]) : ''),
-      matchFields,
+      store: store >= 0 ? cellText(row[store]) : '',
+      settlementKey,
       date: date >= 0 ? formatCellDate(row[date]) : '',
       sourceRow,
     };
@@ -630,32 +632,32 @@ function parseBindingTemplate(grid: unknown[][], quoteNames: string[]): Binding[
   const quoteIndex = normalizedHeaders.findIndex((header) => /^(所用报价|报价名称|报价方案)$/.test(header));
   const prepaidIndex = normalizedHeaders.findIndex((header) => /^预付面单费(?:\(元\))?$/.test(header));
   if (quoteIndex < 0 || prepaidIndex < 0) throw new Error('模板必须包含“所用报价/报价名称”和“预付面单费”两列');
-  const conditionIndexes = headers.map((header, index) => ({ header, index })).filter((item) => item.header && item.index !== quoteIndex && item.index !== prepaidIndex);
-  if (!conditionIndexes.length) throw new Error('请至少保留一个自定义匹配条件列');
+  const matchKeyIndex = normalizedHeaders.findIndex((header) => /^(结算条件组合值|组合匹配值|结算组合值)$/.test(header));
+  const legacyConditionIndexes = headers.map((header, index) => ({ header, index })).filter((item) => item.header && item.index !== quoteIndex && item.index !== prepaidIndex);
+  if (matchKeyIndex < 0 && !legacyConditionIndexes.length) throw new Error('模板必须包含“结算条件组合值”列');
   const rows = grid.slice(1).filter((row) => row.some((cell) => cellText(cell)));
   if (!rows.length) throw new Error('模板中没有可导入的结算关系');
   const combinations = new Set<string>();
   return rows.map((row, index) => {
     const rowNumber = index + 2;
-    const conditions = Object.fromEntries(conditionIndexes.map(({ header, index: column }) => [header, cellText(row[column])]));
-    const missingCondition = Object.entries(conditions).find(([, value]) => !value);
-    if (missingCondition) throw new Error(`第 ${rowNumber} 行条件“${missingCondition[0]}”不能为空`);
+    const legacyValues = legacyConditionIndexes.map(({ index: column }) => cellText(row[column]));
+    if (matchKeyIndex < 0 && legacyValues.some((value) => !value)) throw new Error(`第 ${rowNumber} 行结算条件不能为空`);
+    const matchKey = cleanSettlementKey(matchKeyIndex >= 0 ? cellText(row[matchKeyIndex]) : combineSettlementValues(legacyValues));
+    if (!matchKey) throw new Error(`第 ${rowNumber} 行“结算条件组合值”不能为空`);
     const requestedQuote = cellText(row[quoteIndex]);
     const matchedQuote = quoteNames.find((name) => quoteNamesMatch(requestedQuote, name));
     if (!requestedQuote || !matchedQuote) throw new Error(`第 ${rowNumber} 行报价“${requestedQuote || '空白'}”未在报价管理中导入`);
-    const combinationKey = Object.entries(conditions).map(([key, value]) => `${normalizeHeader(key)}=${normalizeMatchValue(value)}`).join('|');
+    const combinationKey = normalizeMatchValue(matchKey);
     if (combinations.has(combinationKey)) throw new Error(`第 ${rowNumber} 行匹配条件组合重复`);
     combinations.add(combinationKey);
     const prepaid = Number(row[prepaidIndex]);
     if (!Number.isFinite(prepaid) || prepaid < 0) throw new Error(`第 ${rowNumber} 行预付面单费必须是大于或等于 0 的数字`);
-    const customer = Object.entries(conditions).find(([key]) => /客户|货主/.test(key))?.[1] ?? '';
-    const store = Object.entries(conditions).find(([key]) => /店铺|门店/.test(key))?.[1] ?? '';
-    return { id: crypto.randomUUID(), customer, store, quote: matchedQuote, prepaid, conditions };
+    return { id: crypto.randomUUID(), customer: '', store: '', quote: matchedQuote, prepaid, matchKey };
   });
 }
 
 function migrateBinding(binding: Binding): Binding {
-  return { ...binding, conditions: getBindingConditions(binding) };
+  return { ...binding, matchKey: getBindingKey(binding) };
 }
 
 function getBindingConditions(binding: Binding): Record<string, string> {
@@ -666,40 +668,44 @@ function getBindingConditions(binding: Binding): Record<string, string> {
   return conditions;
 }
 
-function getBindingConditionKeys(bindings: Binding[]) {
-  return [...new Set(bindings.flatMap((binding) => Object.keys(getBindingConditions(binding))))];
-}
-
 function normalizeMatchValue(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, '');
 }
 
-function bindingConditionsEqual(left: Record<string, string>, right: Record<string, string>) {
-  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])];
-  return keys.every((key) => normalizeMatchValue(left[key] ?? '') === normalizeMatchValue(right[key] ?? ''));
+function combineSettlementValues(values: string[]) {
+  return values.map((value) => value.trim()).join('+');
 }
 
-function resolveBinding(bindings: Binding[], matchFields: Record<string, string>) {
+function cleanSettlementKey(value: string) {
+  return value.split('+').map((part) => part.trim()).join('+');
+}
+
+function getBindingKey(binding: Binding) {
+  if (binding.matchKey?.trim()) return cleanSettlementKey(binding.matchKey);
+  return combineSettlementValues(Object.values(getBindingConditions(binding)));
+}
+
+function settlementKeysEqual(left: string, right: string) {
+  return normalizeMatchValue(left) === normalizeMatchValue(right);
+}
+
+function resolveBinding(bindings: Binding[], settlementKey: string) {
   if (!bindings.length) return { binding: undefined, error: '' };
-  const matches = bindings.filter((binding) => {
-    const conditions = getBindingConditions(binding);
-    return Object.entries(conditions).every(([key, expected]) => normalizeMatchValue(matchFields[key] ?? '') === normalizeMatchValue(expected));
-  });
-  if (!matches.length) return { binding: undefined, error: `没有命中任何结算关系；收到条件：${formatMatchFields(matchFields) || '未提供'}` };
-  if (matches.length > 1) return { binding: undefined, error: `同时命中 ${matches.length} 条结算关系，请补充或调整条件列` };
+  const cleanedKey = cleanSettlementKey(settlementKey);
+  if (!cleanedKey || cleanedKey.split('+').some((part) => !part)) return { binding: undefined, error: `结算条件组合值包含空白项；收到：${cleanedKey || '未提供'}` };
+  const matches = bindings.filter((binding) => settlementKeysEqual(getBindingKey(binding), cleanedKey));
+  if (!matches.length) return { binding: undefined, error: `没有命中任何结算关系；收到组合值：${cleanedKey}` };
+  if (matches.length > 1) return { binding: undefined, error: `组合值“${cleanedKey}”同时命中 ${matches.length} 条关系，请删除重复规则` };
   return { binding: matches[0], error: '' };
 }
 
-function legacyMatchFields(row: ShipmentInput) {
-  return Object.fromEntries([['所属客户', row.customer ?? ''], ['店铺名称', row.store ?? '']].filter(([, value]) => value));
-}
-
-function formatMatchFields(fields?: Record<string, string>) {
-  return Object.entries(fields ?? {}).filter(([, value]) => value).map(([key, value]) => `${key}=${value}`).join('；');
+function legacySettlementKey(row: ShipmentInput) {
+  if (row.matchFields && Object.keys(row.matchFields).length) return combineSettlementValues(Object.values(row.matchFields));
+  return combineSettlementValues([row.customer ?? '', row.store ?? ''].filter(Boolean));
 }
 
 function formatBindingConditions(binding: Binding) {
-  return formatMatchFields(getBindingConditions(binding));
+  return getBindingKey(binding);
 }
 
 function findWorkbookQuote(quotes: ImportedWorkbookQuote[], requested: string) {
