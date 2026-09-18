@@ -54,6 +54,8 @@ export type ImportedWorkbookQuote = {
   };
   detectedSheets: string[];
   warnings: string[];
+  importedAt?: string;
+  version?: number;
 };
 
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -262,6 +264,12 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
     if ((sheetMap.get(name)?.length ?? 0) > 1) warnings.push(`${name}需要整批账单统计，已识别但不参与单票试算`);
   }
   if (!extraRules.length && sheetMap.has('加收费用')) warnings.push('“加收费用”Sheet 当前没有填写可计算费率');
+  const invalidDateRules = [...baseRules, ...extraRules].filter((rule) => rule.dateStart && rule.dateEnd && rule.dateStart > rule.dateEnd).length;
+  if (invalidDateRules) warnings.push(`${invalidDateRules} 条规则的生效开始日期晚于结束日期，请修正后再用于正式核算`);
+  const incompleteWeightRules = baseRules.filter((rule) => !rule.continued && !rule.bands.length).length;
+  if (incompleteWeightRules) warnings.push(`${incompleteWeightRules} 条基础规则缺少可计算公斤段`);
+  const duplicateRuleCount = baseRules.length - new Set(baseRules.map((rule) => `${rule.destinations.join('|')}::${rule.conditionLabel}::${rule.dateStart ?? ''}::${rule.dateEnd ?? ''}::${rule.bands.map((band) => `${band.upTo}:${band.price}`).join('|')}`)).size;
+  if (duplicateRuleCount) warnings.push(`发现 ${duplicateRuleCount} 条完全重复的基础费用规则`);
   return {
     quoteName: fileName.replace(/\.(xlsx|xls)$/i, ''),
     sourceFile: fileName,
@@ -273,6 +281,8 @@ export function parseWorkbookQuote(fileName: string, sheets: WorkbookSheet[]): I
     globalSettings: parseGlobalSettings(sheetMap.get('全局设置') ?? []),
     detectedSheets: sheets.map((sheet) => sheet.sheet),
     warnings,
+    importedAt: new Date().toISOString(),
+    version: 1,
   };
 }
 

@@ -20,6 +20,8 @@ export type BillRecord = {
   originalGrid?: unknown[][];
   headerRow?: number;
   relationProfileName?: string;
+  configSnapshot?: AppConfigSnapshot;
+  calculationEngineVersion?: string;
 };
 
 const DATABASE_NAME = 'freight-desk-cn';
@@ -95,6 +97,18 @@ export async function saveBillRecord(record: BillRecord) {
   try {
     const transaction = database.transaction('bills', 'readwrite');
     transaction.objectStore('bills').put(record);
+    await transactionDone(transaction);
+  } finally {
+    database.close();
+  }
+}
+
+export async function restoreLocalBackup(config: AppConfigSnapshot, records: BillRecord[]) {
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction(['settings', 'bills'], 'readwrite');
+    transaction.objectStore('settings').put({ key: CONFIG_KEY, value: config, updatedAt: new Date().toISOString() });
+    for (const record of records) transaction.objectStore('bills').put(record);
     await transactionDone(transaction);
   } finally {
     database.close();

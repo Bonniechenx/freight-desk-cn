@@ -24,12 +24,13 @@ import {
   calculateWorkbookFreight, ImportedWorkbookQuote, parseWorkbookQuote, WorkbookSheet,
 } from '@/lib/quote-workbook';
 import {
-  AppConfigSnapshot, BillRecord, deleteBillRecord, listBillRecords, loadAppConfig, saveAppConfig, saveBillRecord,
+  AppConfigSnapshot, BillRecord, deleteBillRecord, listBillRecords, loadAppConfig, restoreLocalBackup, saveAppConfig, saveBillRecord,
 } from '@/lib/local-db';
 
 type View = 'single' | 'batch' | 'quotes' | 'bindings' | 'records';
-type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number; matchKey?: string; conditions?: Record<string, string> };
-type BindingProfile = { id: string; name: string; sourceFile?: string; bindings: Binding[] };
+type QuoteSelectionStrategy = 'priority' | 'lowest_total' | 'lowest_base';
+type Binding = { id: string; store: string; customer: string; quote: string; prepaid: number; matchKey?: string; conditions?: Record<string, string>; priority?: number; strategy?: QuoteSelectionStrategy; enabled?: boolean };
+type BindingProfile = { id: string; name: string; sourceFile?: string; bindings: Binding[]; version?: number; updatedAt?: string };
 type QuoteFolder = { id: string; name: string };
 
 const UNFILED_FOLDER_ID = '__unfiled__';
@@ -102,7 +103,7 @@ export default function Home() {
           <MobileNav view={view} setView={setView} />
           <div className="mx-auto max-w-[1480px] p-4 md:p-8">
             <div className={view === 'single' ? '' : 'hidden'}><SingleCalculator pricing={pricing} surcharges={surcharges} workbookQuotes={workbookQuotes} bindingProfiles={bindingProfiles} goBatch={() => setView('batch')} /></div>
-            <div className={view === 'batch' ? '' : 'hidden'}><BatchCalculator pricing={pricing} surcharges={surcharges} workbookQuotes={workbookQuotes} bindingProfiles={bindingProfiles} onRecordSaved={() => setHistoryRevision((value) => value + 1)} /></div>
+            <div className={view === 'batch' ? '' : 'hidden'}><BatchCalculator pricing={pricing} surcharges={surcharges} workbookQuotes={workbookQuotes} bindingProfiles={bindingProfiles} configSnapshot={configSnapshot} onRecordSaved={() => setHistoryRevision((value) => value + 1)} /></div>
             <div className={view === 'quotes' ? '' : 'hidden'}><QuoteEditor pricing={pricing} setPricing={setPricing} surcharges={surcharges} setSurcharges={setSurcharges} workbookQuotes={workbookQuotes} setWorkbookQuotes={setWorkbookQuotes} quoteFolders={quoteFolders} setQuoteFolders={setQuoteFolders} saveConfig={saveConfig} /></div>
             <div className={view === 'bindings' ? '' : 'hidden'}><BindingsEditor profiles={bindingProfiles} setProfiles={setBindingProfiles} quoteNames={workbookQuotes.length ? workbookQuotes.map((quote) => quote.quoteName) : [pricing.quoteName]} /></div>
             <div className={view === 'records' ? '' : 'hidden'}><LocalDataCenter revision={historyRevision} config={configSnapshot} workbookQuotes={workbookQuotes} bindingProfiles={bindingProfiles} /></div>
@@ -165,33 +166,32 @@ function SingleCalculator({ pricing, surcharges, workbookQuotes, bindingProfiles
   const [profileId, setProfileId] = useState(bindingProfiles[0]?.id ?? '');
   const activeProfile = profileId ? bindingProfiles.find((profile) => profile.id === profileId) ?? bindingProfiles[0] : undefined;
   const bindings = useMemo(() => activeProfile?.bindings ?? [], [activeProfile]);
-  const [bindingId, setBindingId] = useState(bindings[0]?.id ?? '');
+  const settlementKeys = useMemo(() => Array.from(new Set(bindings.filter(bindingEnabled).map(getBindingKey))), [bindings]);
+  const [settlementKey, setSettlementKey] = useState(settlementKeys[0] ?? '');
+  const activeSettlementKey = settlementKeys.includes(settlementKey) ? settlementKey : settlementKeys[0] ?? '';
   const [rateCondition, setRateCondition] = useState('');
   const [date, setDate] = useState('2026-09-15');
-  const binding = bindings.find((item) => item.id === bindingId) ?? bindings[0];
-  const matchedWorkbookQuote = binding ? findWorkbookQuote(workbookQuotes, binding.quote) : workbookQuotes[0];
-  const workbookQuote = matchedWorkbookQuote ?? (workbookQuotes.length === 1 && binding?.quote === pricing.quoteName ? workbookQuotes[0] : undefined);
-  const activeQuoteName = workbookQuote?.quoteName ?? binding?.quote ?? pricing.quoteName;
+  const activeBindings = bindings.filter((item) => settlementKeysEqual(getBindingKey(item), activeSettlementKey) && bindingEnabled(item));
+  const activeQuoteName = activeBindings.length > 1 ? `${activeBindings.length} 个候选报价` : activeBindings[0]?.quote ?? pricing.quoteName;
   const result = useMemo(() => {
-    const input: ShipmentInput = { trackingNo: '单票试算', destination, weight: Number(weight), quotePlan: activeQuoteName, customer: binding?.customer, store: binding?.store, settlementKey: binding ? getBindingKey(binding) : '', rateCondition, date };
-    if (binding && workbookQuotes.length && !workbookQuote) return feeError(input, activeQuoteName, `条件组合已指定报价“${activeQuoteName}”，但该报价尚未导入`);
-    return workbookQuote ? calculateWorkbookFreight(input, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(input, pricing, surcharges, binding?.prepaid ?? 0);
-  }, [destination, weight, rateCondition, date, pricing, surcharges, workbookQuote, workbookQuotes.length, binding, activeQuoteName]);
+    const input: ShipmentInput = { trackingNo: '单票试算', destination, weight: Number(weight), settlementKey: activeSettlementKey, rateCondition, date };
+    return calculateBatchRows([input], pricing, surcharges, workbookQuotes, bindings)[0];
+  }, [destination, weight, rateCondition, date, pricing, surcharges, workbookQuotes, bindings, activeSettlementKey]);
 
   return (
     <>
       <PageIntro eyebrow={`${activeQuoteName} · 当前生效`} title="输入计费条件，立即解释价格" description="先按结算条件组合值确定报价表，再匹配物流公司或渠道、生效日期、目的地、公斤段和加收费。" action={<Button onClick={goBatch} className="h-10 bg-[#0d7f75] px-4 text-white hover:bg-[#0a6d65]">进入批量核算 <ChevronRight /></Button>} />
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,.75fr)]">
-        <Panel title="计费条件" description={workbookQuote ? `${workbookQuote.periods.length || 1} 个生效期，${workbookQuote.bandLabels.length} 个表头公斤段` : `首重 ${pricing.firstWeight}kg / ¥${pricing.firstPrice}，续重 ${pricing.continuedStep}kg / ¥${pricing.continuedPrice}`}>
+        <Panel title="计费条件" description={workbookQuotes.length ? `自动比较候选报价，并保留选价原因` : `首重 ${pricing.firstWeight}kg / ¥${pricing.firstPrice}，续重 ${pricing.continuedStep}kg / ¥${pricing.continuedPrice}`}>
           <div className="grid gap-5 p-5 md:grid-cols-2 md:p-6">
             <Field label="目的地（省 / 市）" icon={MapPin}><Input value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="例如：广东省深圳市" className="h-11 bg-white" /></Field>
             <Field label="实际重量" icon={Weight}><InputWithUnit value={weight} setValue={setWeight} unit="kg" /></Field>
-            <Field label="结算&报价关系表" icon={Store}><NativeSelect value={activeProfile?.id ?? ''} onChange={(event) => { const profile = bindingProfiles.find((item) => item.id === event.target.value); setProfileId(event.target.value); setBindingId(profile?.bindings[0]?.id ?? ''); }} className="h-11 bg-white">{bindingProfiles.map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}</NativeSelect></Field>
-            <Field label="结算条件组合" icon={Store}><NativeSelect value={binding?.id ?? ''} onChange={(event) => setBindingId(event.target.value)} className="h-11 bg-white">{bindings.map((item) => <NativeSelectOption key={item.id} value={item.id}>{formatBindingConditions(item)}</NativeSelectOption>)}</NativeSelect></Field>
+            <Field label="结算&报价关系表" icon={Store}><NativeSelect value={activeProfile?.id ?? ''} onChange={(event) => { const profile = bindingProfiles.find((item) => item.id === event.target.value); setProfileId(event.target.value); setSettlementKey(Array.from(new Set((profile?.bindings ?? []).filter(bindingEnabled).map(getBindingKey)))[0] ?? ''); }} className="h-11 bg-white">{bindingProfiles.map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}</NativeSelect></Field>
+            <Field label="结算条件组合" icon={Store}><NativeSelect value={activeSettlementKey} onChange={(event) => setSettlementKey(event.target.value)} className="h-11 bg-white">{settlementKeys.map((key) => <NativeSelectOption key={key} value={key}>{key}（{bindings.filter((item) => bindingEnabled(item) && settlementKeysEqual(getBindingKey(item), key)).length} 个候选）</NativeSelectOption>)}</NativeSelect></Field>
             <Field label="物流公司 / 报价条件" icon={Boxes}><Input value={rateCondition} onChange={(event) => setRateCondition(event.target.value)} placeholder="例如：九象圆通拼多多0-2" className="h-11 bg-white" /></Field>
             <Field label="发货日期" icon={FileSpreadsheet}><Input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="h-11 bg-white" /></Field>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-slate-50/70 px-5 py-4 text-xs text-muted-foreground md:px-6"><span>{workbookQuote ? `按报价表头自动识别阶梯价与续重方式` : `计费重量按 ${pricing.continuedStep}kg ${roundingText(pricing.rounding)}`}</span><span className="font-mono">报价 · {activeQuoteName}</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-slate-50/70 px-5 py-4 text-xs text-muted-foreground md:px-6"><span>{workbookQuotes.length ? `按关系配置的选价策略自动选择` : `计费重量按 ${pricing.continuedStep}kg ${roundingText(pricing.rounding)}`}</span><span className="font-mono">候选 · {activeQuoteName}</span></div>
         </Panel>
         <ResultCard result={result} />
       </div>
@@ -217,22 +217,48 @@ type PendingBatchImport = {
   headerRow: number;
 };
 
+function calculateCandidate(row: ShipmentInput, binding: Binding | undefined, pricing: PricingConfig, surcharges: SurchargeRule[], workbookQuotes: ImportedWorkbookQuote[]) {
+  const bindingQuote = binding?.quote || row.quotePlan || (workbookQuotes.length === 1 ? workbookQuotes[0].quoteName : pricing.quoteName);
+  const workbookQuote = findWorkbookQuote(workbookQuotes, bindingQuote) ?? (workbookQuotes.length === 1 && bindingQuote === pricing.quoteName ? workbookQuotes[0] : undefined);
+  const requestedQuote = workbookQuote?.quoteName ?? bindingQuote;
+  if (workbookQuotes.length && !workbookQuote) return feeError(row, requestedQuote, `报价“${requestedQuote}”尚未导入`, binding?.prepaid ?? 0);
+  const calculatedInput = { ...row, quotePlan: requestedQuote, customer: row.customer || binding?.customer, store: row.store || binding?.store };
+  return workbookQuote ? calculateWorkbookFreight(calculatedInput, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(calculatedInput, pricing, surcharges, binding?.prepaid ?? 0);
+}
+
 function calculateBatchRows(rows: ShipmentInput[], pricing: PricingConfig, surcharges: SurchargeRule[], workbookQuotes: ImportedWorkbookQuote[], bindings: Binding[]) {
   return rows.map((row) => {
-    const resolved = resolveBinding(bindings, row.settlementKey || legacySettlementKey(row));
+    const resolved = resolveBindings(bindings, row.settlementKey || legacySettlementKey(row));
     if (bindings.length && resolved.error) return feeError(row, row.quotePlan || '未匹配报价', `原表第 ${row.sourceRow ?? '—'} 行${resolved.error}`);
-    const binding = resolved.binding;
-    if (binding && row.quotePlan && !quoteNamesMatch(row.quotePlan, binding.quote)) return feeError(row, binding.quote, `账单报价“${row.quotePlan}”与条件组合指定报价“${binding.quote}”不一致`, binding.prepaid);
-    const bindingQuote = binding?.quote || row.quotePlan || (workbookQuotes.length === 1 ? workbookQuotes[0].quoteName : pricing.quoteName);
-    const workbookQuote = findWorkbookQuote(workbookQuotes, bindingQuote) ?? (workbookQuotes.length === 1 && bindingQuote === pricing.quoteName ? workbookQuotes[0] : undefined);
-    const requestedQuote = workbookQuote?.quoteName ?? bindingQuote;
-    if (workbookQuotes.length && !workbookQuote) return feeError(row, requestedQuote, `条件组合指定报价“${requestedQuote}”，但该报价尚未导入`, binding?.prepaid ?? 0);
-    const calculatedInput = { ...row, quotePlan: requestedQuote, customer: row.customer || binding?.customer, store: row.store || binding?.store };
-    return workbookQuote ? calculateWorkbookFreight(calculatedInput, workbookQuote, binding?.prepaid ?? 0) : calculateFreight(calculatedInput, pricing, surcharges, binding?.prepaid ?? 0);
+    const candidates = resolved.bindings;
+    if (!candidates.length) return calculateCandidate(row, undefined, pricing, surcharges, workbookQuotes);
+    if (row.quotePlan && !candidates.some((candidate) => quoteNamesMatch(row.quotePlan ?? '', candidate.quote))) {
+      return feeError(row, candidates[0].quote, `账单报价“${row.quotePlan}”不在该组合值的 ${candidates.length} 个候选报价中`);
+    }
+    const strategy = candidates[0].strategy ?? 'priority';
+    const calculated = candidates.map((binding) => ({ binding, result: calculateCandidate(row, binding, pricing, surcharges, workbookQuotes) }));
+    const successful = calculated.filter((item) => item.result.status === 'ok');
+    if (!successful.length) {
+      const details = calculated.map((item) => `${item.binding.quote}：${item.result.explanation}`).join('；');
+      return feeError(row, candidates.map((item) => item.quote).join(' / '), `候选报价均未通过：${details}`);
+    }
+    const sorted = [...successful].sort((left, right) => {
+      if (strategy === 'lowest_total') return left.result.total - right.result.total || bindingPriority(left.binding) - bindingPriority(right.binding) || left.binding.quote.localeCompare(right.binding.quote, 'zh-CN');
+      if (strategy === 'lowest_base') return left.result.baseFee - right.result.baseFee || bindingPriority(left.binding) - bindingPriority(right.binding) || left.binding.quote.localeCompare(right.binding.quote, 'zh-CN');
+      return bindingPriority(left.binding) - bindingPriority(right.binding) || left.binding.quote.localeCompare(right.binding.quote, 'zh-CN');
+    });
+    const selected = sorted[0].result;
+    const strategyText = strategy === 'lowest_total' ? '最低合计' : strategy === 'lowest_base' ? '最低基础费' : '固定优先级';
+    const reason = `${strategyText}：从 ${candidates.length} 个候选中选择“${selected.quoteName}”${calculated.length !== successful.length ? `，${calculated.length - successful.length} 个候选未通过` : ''}`;
+    if (row.quotePlan && !quoteNamesMatch(row.quotePlan, selected.quoteName)) {
+      const error = feeError(row, selected.quoteName, `账单报价“${row.quotePlan}”与系统按${strategyText}选出的“${selected.quoteName}”不一致`);
+      return { ...error, selectionStrategy: strategy, selectionReason: reason, candidateQuotes: candidates.map((item) => item.quote) };
+    }
+    return { ...selected, selectionStrategy: strategy, selectionReason: reason, candidateQuotes: candidates.map((item) => item.quote), explanation: `${reason}；${selected.explanation}` };
   });
 }
 
-function BatchCalculator({ pricing, surcharges, workbookQuotes, bindingProfiles, onRecordSaved }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuotes: ImportedWorkbookQuote[]; bindingProfiles: BindingProfile[]; onRecordSaved: () => void }) {
+function BatchCalculator({ pricing, surcharges, workbookQuotes, bindingProfiles, configSnapshot, onRecordSaved }: { pricing: PricingConfig; surcharges: SurchargeRule[]; workbookQuotes: ImportedWorkbookQuote[]; bindingProfiles: BindingProfile[]; configSnapshot: AppConfigSnapshot; onRecordSaved: () => void }) {
   const [profileId, setProfileId] = useState(bindingProfiles[0]?.id ?? '');
   const activeProfile = profileId ? bindingProfiles.find((profile) => profile.id === profileId) ?? bindingProfiles[0] : undefined;
   const bindings = useMemo(() => activeProfile?.bindings ?? [], [activeProfile]);
@@ -303,6 +329,11 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindingProfiles,
       return;
     }
     const calculated = calculateBatchRows(parsed, pricing, surcharges, workbookQuotes, bindings);
+    const preflightErrors = calculated.filter((row) => row.status === 'error').length;
+    if (preflightErrors && !window.confirm(`计算前校验发现 ${preflightErrors} 条异常、${calculated.length - preflightErrors} 条可正常计算。是否继续保存本次结果？`)) {
+      setMappingError(`已取消保存：请先处理 ${preflightErrors} 条异常后重新计算`);
+      return;
+    }
     setRows(parsed);
     setFileName(pendingImport.fileName);
     try {
@@ -311,6 +342,7 @@ function BatchCalculator({ pricing, surcharges, workbookQuotes, bindingProfiles,
         rowCount: calculated.length, total: calculated.reduce((sum, row) => sum + row.total, 0),
         errorCount: calculated.filter((row) => row.status === 'error').length, results: calculated,
         originalGrid: pendingImport.grid, headerRow: pendingImport.headerRow, relationProfileName: activeProfile?.name,
+        configSnapshot: JSON.parse(JSON.stringify(configSnapshot)) as AppConfigSnapshot, calculationEngineVersion: '1.1.0',
       });
       onRecordSaved();
       setMessage(`已使用“${activeProfile?.name ?? '账单报价列'}”计算 ${parsed.length} 条，并自动保存到“账单记录”`);
@@ -393,11 +425,13 @@ function QuoteEditor({ pricing, setPricing, surcharges, setSurcharges, workbookQ
     setImportMessage('');
     try {
       const sheets = await readXlsxFile(file);
-      const imported = { ...parseWorkbookQuote(file.name, sheets as WorkbookSheet[]), folderId: targetFolderId === UNFILED_FOLDER_ID ? undefined : targetFolderId };
+      const parsedQuote = parseWorkbookQuote(file.name, sheets as WorkbookSheet[]);
+      const previousQuote = workbookQuotes.find((quote) => quoteNamesMatch(quote.quoteName, parsedQuote.quoteName));
+      const imported = { ...parsedQuote, version: (previousQuote?.version ?? 0) + 1, importedAt: new Date().toISOString(), folderId: targetFolderId === UNFILED_FOLDER_ID ? undefined : targetFolderId };
       setWorkbookQuotes([...workbookQuotes.filter((quote) => !quoteNamesMatch(quote.quoteName, imported.quoteName)), imported]);
       setImportError(false);
       const folderName = quoteFolders.find((folder) => folder.id === targetFolderId)?.name ?? '未分类';
-      setImportMessage(`已将“${imported.quoteName}”加入“${folderName}”：${imported.baseRules.length} 条基础费用、${imported.extraRules.length} 条加收费`);
+      setImportMessage(`已将“${imported.quoteName}”V${imported.version} 加入“${folderName}”：${imported.baseRules.length} 条基础费用、${imported.extraRules.length} 条加收费${imported.warnings.length ? `，${imported.warnings.length} 项风险提示` : '，校验通过'}`);
     } catch (error) {
       setImportError(true);
       setImportMessage(error instanceof Error ? error.message : '运费宝报价解析失败');
@@ -454,7 +488,7 @@ function QuoteFolderGroup({ folder, quoteFolders, onMoveQuote, onRemoveQuote, on
     <AccordionTrigger className="py-4 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 fill-sky-100 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{folder.name}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{folder.quotes.length} 份报价</p></div></div></AccordionTrigger>
     <AccordionContent className="pb-5">
       {folder.id !== UNFILED_FOLDER_ID && <div className="mb-3 flex justify-end"><Button variant="ghost" size="sm" disabled={folder.quotes.length > 0} title={folder.quotes.length ? '请先移动或移除文件夹中的报价' : '删除空文件夹'} onClick={onRemoveFolder}><Trash2 className="text-rose-600" />删除空文件夹</Button></div>}
-      {folder.quotes.length ? <div className="overflow-hidden rounded-xl border bg-slate-50/50"><Accordion defaultValue={[folder.quotes[0].quoteName]}>{folder.quotes.map((quote) => <AccordionItem key={quote.quoteName} value={quote.quoteName} className="px-4"><AccordionTrigger className="py-3 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><FileSpreadsheet className="size-4 shrink-0 text-emerald-600" /><div className="min-w-0"><p className="truncate font-medium">{quote.quoteName}</p><p className="mt-1 truncate text-xs font-normal text-muted-foreground">{quote.sourceFile} · 基础 {quote.baseRules.length} 条 · 加收 {quote.extraRules.length} 条</p></div></div></AccordionTrigger><AccordionContent className="pb-4"><div className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-end justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold text-emerald-700"><CheckCircle2 className="size-4" />报价已启用</div><div className="flex flex-wrap items-end gap-2"><label className="space-y-1"><span className="block text-[11px] font-semibold text-slate-500">所属文件夹</span><NativeSelect value={quote.folderId ?? UNFILED_FOLDER_ID} onChange={(event) => onMoveQuote(quote.quoteName, event.target.value)} className="h-9 min-w-36"><NativeSelectOption value={UNFILED_FOLDER_ID}>未分类</NativeSelectOption>{quoteFolders.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></label><Button variant="outline" size="sm" onClick={() => { if (window.confirm(`确定删除报价“${quote.quoteName}”吗？删除后使用它的结算关系将无法计算。`)) onRemoveQuote(quote.quoteName); }}><Trash2 className="text-rose-600" />删除报价</Button></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><CompactMetric label="基础费用" value={`${quote.baseRules.length} 条`} /><CompactMetric label="加收费用" value={`${quote.extraRules.length} 条`} /><CompactMetric label="物流条件" value={`${quote.conditionLabels?.length ?? 0} 种`} /><CompactMetric label="生效期" value={`${quote.periods.length || 1} 个`} /></div><div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-3"><QuoteTagGroup label="已识别工作表" values={quote.detectedSheets} /><QuoteTagGroup label="物流公司 / 报价条件" values={quote.conditionLabels ?? []} accent /><QuoteTagGroup label="加收费用明细" values={quote.extraRules.map((rule) => rule.name)} accent /></div>{quote.warnings.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{quote.warnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}</div></AccordionContent></AccordionItem>)}</Accordion></div> : <div className="rounded-xl border border-dashed bg-slate-50 p-8 text-center text-sm text-muted-foreground">这个文件夹还是空的。请在页面上方选中它，再导入报价。</div>}
+      {folder.quotes.length ? <div className="overflow-hidden rounded-xl border bg-slate-50/50"><Accordion defaultValue={[folder.quotes[0].quoteName]}>{folder.quotes.map((quote) => <AccordionItem key={quote.quoteName} value={quote.quoteName} className="px-4"><AccordionTrigger className="py-3 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><FileSpreadsheet className="size-4 shrink-0 text-emerald-600" /><div className="min-w-0"><p className="truncate font-medium">{quote.quoteName} · V{quote.version ?? 1}</p><p className="mt-1 truncate text-xs font-normal text-muted-foreground">{quote.sourceFile} · 基础 {quote.baseRules.length} 条 · 加收 {quote.extraRules.length} 条</p></div></div></AccordionTrigger><AccordionContent className="pb-4"><div className="rounded-xl border bg-white p-4"><div className="flex flex-wrap items-end justify-between gap-3"><div className={`flex items-center gap-2 text-sm font-semibold ${quote.warnings.length ? 'text-amber-700' : 'text-emerald-700'}`}>{quote.warnings.length ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}{quote.warnings.length ? `有 ${quote.warnings.length} 项风险，建议复核` : '校验通过，可用于核算'}</div><div className="flex flex-wrap items-end gap-2"><label className="space-y-1"><span className="block text-[11px] font-semibold text-slate-500">所属文件夹</span><NativeSelect value={quote.folderId ?? UNFILED_FOLDER_ID} onChange={(event) => onMoveQuote(quote.quoteName, event.target.value)} className="h-9 min-w-36"><NativeSelectOption value={UNFILED_FOLDER_ID}>未分类</NativeSelectOption>{quoteFolders.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></label><Button variant="outline" size="sm" onClick={() => { if (window.confirm(`确定删除报价“${quote.quoteName}”吗？删除后使用它的结算关系将无法计算。`)) onRemoveQuote(quote.quoteName); }}><Trash2 className="text-rose-600" />删除报价</Button></div></div><div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><CompactMetric label="基础费用" value={`${quote.baseRules.length} 条`} /><CompactMetric label="加收费用" value={`${quote.extraRules.length} 条`} /><CompactMetric label="物流条件" value={`${quote.conditionLabels?.length ?? 0} 种`} /><CompactMetric label="生效期" value={`${quote.periods.length || 1} 个`} /></div><div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-3"><QuoteTagGroup label="已识别工作表" values={quote.detectedSheets} /><QuoteTagGroup label="物流公司 / 报价条件" values={quote.conditionLabels ?? []} accent /><QuoteTagGroup label="加收费用明细" values={quote.extraRules.map((rule) => rule.name)} accent /></div>{quote.warnings.length > 0 && <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{quote.warnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}</div></AccordionContent></AccordionItem>)}</Accordion></div> : <div className="rounded-xl border border-dashed bg-slate-50 p-8 text-center text-sm text-muted-foreground">这个文件夹还是空的。请在页面上方选中它，再导入报价。</div>}
     </AccordionContent>
   </AccordionItem>;
 }
@@ -462,28 +496,30 @@ function QuoteFolderGroup({ folder, quoteFolders, onMoveQuote, onRemoveQuote, on
 function BindingsEditor({ profiles, setProfiles, quoteNames }: { profiles: BindingProfile[]; setProfiles: (value: BindingProfile[]) => void; quoteNames: string[] }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [activeProfileId, setActiveProfileId] = useState(profiles[0]?.id ?? '');
-  const [draft, setDraft] = useState({ matchKey: '', quote: quoteNames[0] ?? '', prepaid: '0' });
+  const [draft, setDraft] = useState<{ matchKey: string; quote: string; prepaid: string; priority: string; strategy: QuoteSelectionStrategy }>({ matchKey: '', quote: quoteNames[0] ?? '', prepaid: '0', priority: '1', strategy: 'priority' });
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState(false);
   const [importing, setImporting] = useState(false);
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
   const bindings = activeProfile?.bindings ?? [];
-  const updateBindings = (profileId: string, nextBindings: Binding[]) => setProfiles(profiles.map((profile) => profile.id === profileId ? { ...profile, bindings: nextBindings } : profile));
+  const updateBindings = (profileId: string, nextBindings: Binding[]) => setProfiles(profiles.map((profile) => profile.id === profileId ? { ...profile, bindings: nextBindings, version: (profile.version ?? 1) + 1, updatedAt: new Date().toISOString() } : profile));
   const createProfile = () => {
-    const profile: BindingProfile = { id: crypto.randomUUID(), name: `新关系表 ${profiles.length + 1}`, bindings: [] };
+    const profile: BindingProfile = { id: crypto.randomUUID(), name: `新关系表 ${profiles.length + 1}`, bindings: [], version: 1, updatedAt: new Date().toISOString() };
     setProfiles([...profiles, profile]);
     setActiveProfileId(profile.id);
   };
   const add = () => {
     if (!activeProfile) return;
     const matchKey = cleanSettlementKey(draft.matchKey);
-    if (!matchKey || bindings.some((binding) => settlementKeysEqual(getBindingKey(binding), matchKey))) return;
-    updateBindings(activeProfile.id, [...bindings, { id: crypto.randomUUID(), store: '', customer: '', quote: draft.quote || quoteNames[0] || '', prepaid: Number(draft.prepaid) || 0, matchKey }]);
-    setDraft({ matchKey: '', quote: draft.quote || quoteNames[0] || '', prepaid: '0' });
+    if (!matchKey || bindings.some((binding) => settlementKeysEqual(getBindingKey(binding), matchKey) && quoteNamesMatch(binding.quote, draft.quote))) return;
+    const sameGroup = bindings.filter((binding) => settlementKeysEqual(getBindingKey(binding), matchKey));
+    const groupStrategy = sameGroup[0]?.strategy ?? draft.strategy;
+    updateBindings(activeProfile.id, [...bindings, { id: crypto.randomUUID(), store: '', customer: '', quote: draft.quote || quoteNames[0] || '', prepaid: Number(draft.prepaid) || 0, matchKey, priority: Math.max(1, Number(draft.priority) || 1), strategy: groupStrategy, enabled: true }]);
+    setDraft({ matchKey: '', quote: draft.quote || quoteNames[0] || '', prepaid: '0', priority: String(sameGroup.length + 2), strategy: groupStrategy });
   };
   const downloadTemplate = () => {
-    const rows = bindings.length ? bindings.map((item) => [getBindingKey(item), item.quote, item.prepaid]) : [['示例客户+示例旗舰店', quoteNames[0] ?? '', 0]];
-    downloadCsv(`${activeProfile?.name ?? '结算报价关系'}-模板.csv`, [['结算条件组合值', '所用报价', '预付面单费'], ...rows]);
+    const rows = bindings.length ? bindings.map((item) => [getBindingKey(item), item.quote, item.prepaid, bindingPriority(item), strategyLabel(item.strategy ?? 'priority'), bindingEnabled(item) ? '是' : '否']) : [['示例客户+示例旗舰店', quoteNames[0] ?? '', 0, 1, '固定优先级', '是'], ['示例客户+示例旗舰店', quoteNames[1] ?? quoteNames[0] ?? '', 0, 2, '固定优先级', '是']];
+    downloadCsv(`${activeProfile?.name ?? '结算报价关系'}-模板.csv`, [['结算条件组合值', '所用报价', '预付面单费', '报价优先级', '选价策略', '是否启用'], ...rows]);
   };
   const importTemplate = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -500,7 +536,7 @@ function BindingsEditor({ profiles, setProfiles, quoteNames }: { profiles: Bindi
         const imported = parseBindingTemplate(grid, quoteNames);
         const profileName = file.name.replace(/\.(xlsx|xls|csv)$/i, '').trim() || `关系表 ${nextProfiles.length + 1}`;
         const existing = nextProfiles.find((profile) => profile.name.toLowerCase() === profileName.toLowerCase());
-        const nextProfile: BindingProfile = { id: existing?.id ?? crypto.randomUUID(), name: profileName, sourceFile: file.name, bindings: imported };
+        const nextProfile: BindingProfile = { id: existing?.id ?? crypto.randomUUID(), name: profileName, sourceFile: file.name, bindings: imported, version: (existing?.version ?? 0) + 1, updatedAt: new Date().toISOString() };
         nextProfiles = existing ? nextProfiles.map((profile) => profile.id === existing.id ? nextProfile : profile) : [...nextProfiles, nextProfile];
         if (existing) updatedCount += 1;
         importedCount += imported.length;
@@ -529,7 +565,7 @@ function BindingsEditor({ profiles, setProfiles, quoteNames }: { profiles: Bindi
       <PageIntro eyebrow={`${profiles.length} 份配置关系表`} title="结算&报价关系配置" description="每次导入保存为一份独立关系表。批量核算时先选择关系表，再按其中的组合值调取对应报价。" action={<div className="flex flex-wrap gap-2"><input ref={fileRef} className="hidden" type="file" accept=".xlsx,.xls,.csv" multiple onChange={importTemplate} /><Button variant="outline" onClick={createProfile} className="h-10"><Plus />新建空白关系表</Button><Button variant="outline" onClick={downloadTemplate} className="h-10"><Download />下载当前模板</Button><Button onClick={() => fileRef.current?.click()} className="h-10 bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Upload />{importing ? '正在导入' : '批量导入关系表'}</Button></div>} />
       <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900">
         <FileSpreadsheet className="mt-0.5 size-5 shrink-0 text-sky-600" />
-        <div><p className="font-semibold">多份关系表互不覆盖</p><p className="mt-1 text-xs leading-5 text-sky-800">模板固定为“结算条件组合值、所用报价、预付面单费”三列。每个文件名就是关系表名称；再次导入同名文件会更新该表，导入不同文件名会新增一份。组合值顺序仍须与批量核算页的选列顺序一致。</p></div>
+        <div><p className="font-semibold">一个组合值可配置多个候选报价</p><p className="mt-1 text-xs leading-5 text-sky-800">模板支持“报价优先级、选价策略、是否启用”。同一组合值可重复多行并填写不同报价；系统按固定优先级、最低合计或最低基础费自动选价，并把选择原因写入结果。</p></div>
       </div>
       {importMessage && <div className={`mb-5 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm ${importError ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>{importError ? <CircleAlert className="size-4" /> : <CheckCircle2 className="size-4" />}<span>{importMessage}</span></div>}
       <section className="grid gap-5 xl:grid-cols-[360px_1fr]">
@@ -539,6 +575,8 @@ function BindingsEditor({ profiles, setProfiles, quoteNames }: { profiles: Bindi
             <TextControl label="结算条件组合值" value={draft.matchKey} setValue={(value) => setDraft({ ...draft, matchKey: value })} placeholder="例如：森屿电商+森屿抖音店" />
             <label className="space-y-2"><span className="text-xs font-semibold text-slate-600">所用报价</span><NativeSelect value={draft.quote} onChange={(event) => setDraft({ ...draft, quote: event.target.value })} className="h-10">{quoteNames.map((name) => <NativeSelectOption key={name} value={name}>{name}</NativeSelectOption>)}</NativeSelect></label>
             <NumberControl label="预付面单费" value={draft.prepaid} setValue={(value) => setDraft({ ...draft, prepaid: value })} unit="元" />
+            <NumberControl label="报价优先级（数字越小越优先）" value={draft.priority} setValue={(value) => setDraft({ ...draft, priority: value })} />
+            <div className="space-y-2"><span className="block text-xs font-semibold text-slate-600">选价策略</span><NativeSelect aria-label="选价策略" value={draft.strategy} onChange={(event) => setDraft({ ...draft, strategy: event.target.value as QuoteSelectionStrategy })} className="h-10"><NativeSelectOption value="priority">固定优先级</NativeSelectOption><NativeSelectOption value="lowest_total">最低合计</NativeSelectOption><NativeSelectOption value="lowest_base">最低基础费</NativeSelectOption></NativeSelect></div>
             <Button onClick={add} disabled={!activeProfile} className="h-10 w-full bg-[#0d7f75] text-white hover:bg-[#0a6d65]"><Plus />添加到当前关系表</Button>
           </div>
         </Panel>
@@ -550,13 +588,13 @@ function BindingsEditor({ profiles, setProfiles, quoteNames }: { profiles: Bindi
   );
 }
 
-function BindingProfileGroup({ profile, quoteNames, onActivate, onRemove, onRemoveBinding }: { profile: BindingProfile; quoteNames: string[]; onActivate: () => void; onRemove: () => void; onRemoveBinding: (bindingId: string) => void }) {
-  const profileQuoteNames = Array.from(new Set([...quoteNames, ...profile.bindings.map((binding) => binding.quote)])).filter(Boolean);
+function BindingProfileGroup({ profile, quoteNames: _quoteNames, onActivate, onRemove, onRemoveBinding }: { profile: BindingProfile; quoteNames: string[]; onActivate: () => void; onRemove: () => void; onRemoveBinding: (bindingId: string) => void }) {
+  const groupKeys = Array.from(new Set(profile.bindings.map(getBindingKey))).filter(Boolean);
   return <AccordionItem value={profile.id} className="px-4 md:px-5">
-    <AccordionTrigger className="py-4 hover:no-underline" onClick={onActivate}><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 fill-sky-100 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{profile.name}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{profile.bindings.length} 条关系{profile.sourceFile ? ` · 来源：${profile.sourceFile}` : ''}</p></div></div></AccordionTrigger>
+    <AccordionTrigger className="py-4 hover:no-underline" onClick={onActivate}><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 fill-sky-100 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{profile.name}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{groupKeys.length} 个组合 · {profile.bindings.length} 个候选 · V{profile.version ?? 1}{profile.sourceFile ? ` · 来源：${profile.sourceFile}` : ''}</p></div></div></AccordionTrigger>
     <AccordionContent className="pb-5">
       <div className="mb-3 flex justify-end"><Button variant="outline" size="sm" onClick={onRemove}><Trash2 className="text-rose-600" />删除关系表</Button></div>
-      <div className="overflow-hidden rounded-xl border bg-slate-50/50"><Accordion>{profileQuoteNames.map((quoteName) => { const quoteBindings = profile.bindings.filter((binding) => quoteNamesMatch(binding.quote, quoteName)); return <AccordionItem key={quoteName} value={`${profile.id}-${quoteName}`} className="px-4"><AccordionTrigger className="py-3 hover:no-underline"><div className="flex items-center gap-3"><FileSpreadsheet className="size-4 text-emerald-600" /><div><p className="font-medium">{quoteName}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{quoteBindings.length} 条结算组合</p></div></div></AccordionTrigger><AccordionContent className="pb-4"><div className="overflow-hidden rounded-xl border bg-white"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>结算条件组合值</TableHead><TableHead className="text-right">面单抵扣</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{quoteBindings.map((item) => <TableRow key={item.id}><TableCell><span className="rounded-md bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700">{getBindingKey(item)}</span></TableCell><TableCell className="text-right">¥{item.prepaid.toFixed(2)}</TableCell><TableCell><Button variant="ghost" size="icon-sm" aria-label="删除绑定" onClick={() => onRemoveBinding(item.id)}><Trash2 className="text-rose-600" /></Button></TableCell></TableRow>)}</TableBody></Table></div></AccordionContent></AccordionItem>; })}</Accordion>{!profile.bindings.length && <div className="p-6 text-center text-xs text-muted-foreground">这份关系表暂时没有规则，可在左侧新增。</div>}</div>
+      <div className="overflow-hidden rounded-xl border bg-slate-50/50"><Accordion>{groupKeys.map((groupKey) => { const candidates = profile.bindings.filter((binding) => settlementKeysEqual(getBindingKey(binding), groupKey)).sort((left, right) => bindingPriority(left) - bindingPriority(right)); return <AccordionItem key={groupKey} value={`${profile.id}-${groupKey}`} className="px-4"><AccordionTrigger className="py-3 hover:no-underline"><div className="flex items-center gap-3"><FileSpreadsheet className="size-4 text-emerald-600" /><div><p className="font-medium">{groupKey}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{candidates.length} 个候选 · {strategyLabel(candidates[0]?.strategy ?? 'priority')}</p></div></div></AccordionTrigger><AccordionContent className="pb-4"><div className="overflow-hidden rounded-xl border bg-white"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>优先级</TableHead><TableHead>候选报价</TableHead><TableHead className="text-right">面单抵扣</TableHead><TableHead>状态</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{candidates.map((item) => <TableRow key={item.id}><TableCell>{bindingPriority(item)}</TableCell><TableCell className="font-medium">{item.quote}</TableCell><TableCell className="text-right">¥{item.prepaid.toFixed(2)}</TableCell><TableCell>{bindingEnabled(item) ? <Status ok>启用</Status> : <Status>停用</Status>}</TableCell><TableCell><Button variant="ghost" size="icon-sm" aria-label="删除绑定" onClick={() => onRemoveBinding(item.id)}><Trash2 className="text-rose-600" /></Button></TableCell></TableRow>)}</TableBody></Table></div></AccordionContent></AccordionItem>; })}</Accordion>{!profile.bindings.length && <div className="p-6 text-center text-xs text-muted-foreground">这份关系表暂时没有规则，可在左侧新增。</div>}</div>
     </AccordionContent>
   </AccordionItem>;
 }
@@ -565,6 +603,8 @@ function LocalDataCenter({ revision, config, workbookQuotes, bindingProfiles }: 
   const [records, setRecords] = useState<BillRecord[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [restoreMessage, setRestoreMessage] = useState('');
+  const restoreRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void listBillRecords().then(setRecords).catch(() => setRecords([])).finally(() => setLoading(false));
@@ -579,14 +619,31 @@ function LocalDataCenter({ revision, config, workbookQuotes, bindingProfiles }: 
     setRecords((current) => current.filter((item) => item.id !== record.id));
   };
   const backup = () => downloadJson(`运费核算台本机备份-${new Date().toISOString().slice(0, 10)}.json`, { exportedAt: new Date().toISOString(), config, billRecords: records });
+  const restore = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as { config?: AppConfigSnapshot; billRecords?: BillRecord[] };
+      if (!parsed.config || !Array.isArray(parsed.billRecords)) throw new Error('备份文件缺少 config 或 billRecords，无法恢复');
+      if (!window.confirm(`将合并恢复 ${parsed.billRecords.length} 条账单记录，并用备份中的报价与关系配置覆盖当前配置。是否继续？`)) return;
+      await restoreLocalBackup(parsed.config, parsed.billRecords);
+      setRestoreMessage(`恢复成功：${parsed.billRecords.length} 条账单记录。正在重新载入配置…`);
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (error) {
+      setRestoreMessage(error instanceof Error ? error.message : '备份文件恢复失败');
+    } finally {
+      event.target.value = '';
+    }
+  };
 
   return <>
-    <PageIntro eyebrow="当前浏览器 · IndexedDB" title="本机数据与账单记录" description="每次完成批量计算都会自动留档。可按文件、运单、地区、客户或报价搜索，并可再次导出。" action={<Button variant="outline" onClick={backup}><Download />导出本机备份</Button>} />
+    <PageIntro eyebrow="当前浏览器 · IndexedDB" title="本机数据与账单记录" description="每次完成批量计算都会自动留档，并保存当时使用的报价与关系配置快照。" action={<div className="flex flex-wrap gap-2"><input ref={restoreRef} className="hidden" type="file" accept=".json" onChange={restore} /><Button variant="outline" onClick={() => restoreRef.current?.click()}><Upload />恢复本机备份</Button><Button variant="outline" onClick={backup}><Download />导出本机备份</Button></div>} />
+    {restoreMessage && <div className="mb-5 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">{restoreMessage}</div>}
     <div className="mb-5 flex items-start gap-3 rounded-2xl border border-sky-100 bg-sky-50/70 p-4 text-sm text-sky-900"><Database className="mt-0.5 size-5 shrink-0 text-sky-600" /><div><p className="font-semibold">数据存放位置说明</p><p className="mt-1 text-xs leading-5 text-sky-800">数据保存在当前浏览器的网站数据（IndexedDB）中，不会显示成 Finder 里的普通文件夹，也不会上传业务数据。清除浏览器网站数据前，请先点击“导出本机备份”。</p></div></div>
     <section className="mb-5 grid gap-4 md:grid-cols-3"><Metric label="账单记录" value={String(records.length)} unit="次" trend="自动留档" /><Metric label="报价配置" value={String(workbookQuotes.length)} unit="份" trend="本机数据库" /><Metric label="关系配置表" value={String(bindingProfiles.length)} unit="份" trend={`${totalBindings} 条规则`} /></section>
     <section className="overflow-hidden rounded-2xl border bg-white shadow-[0_14px_44px_rgba(15,23,42,.05)]">
       <div className="flex flex-col gap-3 border-b p-4 md:flex-row md:items-center md:justify-between md:px-5"><div><h3 className="font-semibold">历史核算文件</h3><p className="mt-1 text-xs text-muted-foreground">像文件夹一样展开查看，可随时重新导出</p></div><div className="relative md:w-80"><Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文件、运单、地区、客户或报价" className="pl-8" /></div></div>
-      {loading ? <div className="p-10 text-center text-sm text-muted-foreground">正在读取本机记录…</div> : filteredRecords.length ? <Accordion>{filteredRecords.map((record) => <AccordionItem key={record.id} value={record.id} className="px-4 md:px-5"><AccordionTrigger className="py-4 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{record.fileName}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{formatLocalDateTime(record.createdAt)} · {record.relationProfileName ? `${record.relationProfileName} · ` : ''}{record.rowCount} 票 · ¥{record.total.toFixed(2)} · {record.errorCount} 条异常</p></div></div></AccordionTrigger><AccordionContent className="pb-5"><div className="mb-3 flex flex-wrap justify-end gap-2"><Button variant="outline" size="sm" onClick={() => record.originalGrid && record.headerRow !== undefined ? exportOriginalWithResultsCsv(`${record.fileName.replace(/\.(xlsx|xls|csv)$/i, '')}-运费核算结果.csv`, record.originalGrid, record.headerRow, record.results, record.relationProfileName) : exportResultsCsv(`${record.fileName.replace(/\.(xlsx|xls|csv)$/i, '')}-运费核算结果.csv`, record.results, record.relationProfileName)}><Download />导出原表 + 结果</Button><Button variant="outline" size="sm" onClick={() => void removeRecord(record)}><Trash2 className="text-rose-600" />删除记录</Button></div><div className="max-h-[460px] overflow-auto rounded-xl border"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead>所用报价</TableHead><TableHead>加收费明细</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{record.results.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell>{row.quoteName}</TableCell><TableCell className="text-xs text-muted-foreground">{formatSurchargeDetails(row)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody></Table></div></AccordionContent></AccordionItem>)}</Accordion> : <div className="p-12 text-center"><FileClock className="mx-auto size-8 text-slate-300" /><p className="mt-3 text-sm font-medium">{search ? '没有符合条件的历史记录' : '还没有保存的账单记录'}</p><p className="mt-1 text-xs text-muted-foreground">完成一次批量核算后会自动出现在这里</p></div>}
+      {loading ? <div className="p-10 text-center text-sm text-muted-foreground">正在读取本机记录…</div> : filteredRecords.length ? <Accordion>{filteredRecords.map((record) => <AccordionItem key={record.id} value={record.id} className="px-4 md:px-5"><AccordionTrigger className="py-4 hover:no-underline"><div className="flex min-w-0 items-center gap-3"><Folder className="size-5 shrink-0 text-sky-600" /><div className="min-w-0"><p className="truncate font-semibold">{record.fileName}</p><p className="mt-1 text-xs font-normal text-muted-foreground">{formatLocalDateTime(record.createdAt)} · {record.relationProfileName ? `${record.relationProfileName} · ` : ''}{record.rowCount} 票 · ¥{record.total.toFixed(2)} · {record.errorCount} 条异常{record.configSnapshot ? ` · 已保存配置快照 V${record.calculationEngineVersion ?? '1.0'}` : ''}</p></div></div></AccordionTrigger><AccordionContent className="pb-5"><div className="mb-3 flex flex-wrap justify-end gap-2"><Button variant="outline" size="sm" onClick={() => record.originalGrid && record.headerRow !== undefined ? exportOriginalWithResultsCsv(`${record.fileName.replace(/\.(xlsx|xls|csv)$/i, '')}-运费核算结果.csv`, record.originalGrid, record.headerRow, record.results, record.relationProfileName) : exportResultsCsv(`${record.fileName.replace(/\.(xlsx|xls|csv)$/i, '')}-运费核算结果.csv`, record.results, record.relationProfileName)}><Download />导出原表 + 结果</Button><Button variant="outline" size="sm" onClick={() => void removeRecord(record)}><Trash2 className="text-rose-600" />删除记录</Button></div><div className="max-h-[460px] overflow-auto rounded-xl border"><Table><TableHeader><TableRow className="bg-slate-50"><TableHead>运单号</TableHead><TableHead>目的地</TableHead><TableHead>所用报价</TableHead><TableHead>选价说明</TableHead><TableHead>加收费明细</TableHead><TableHead className="text-right">合计</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{record.results.map((row, index) => <TableRow key={`${row.trackingNo}-${index}`}><TableCell className="font-mono text-xs">{row.trackingNo}</TableCell><TableCell>{row.destination}</TableCell><TableCell>{row.quoteName}</TableCell><TableCell className="max-w-64 text-xs text-muted-foreground">{row.selectionReason ?? '单一报价'}</TableCell><TableCell className="text-xs text-muted-foreground">{formatSurchargeDetails(row)}</TableCell><TableCell className="text-right font-semibold">¥{row.total.toFixed(2)}</TableCell><TableCell>{row.status === 'ok' ? <Status ok>成功</Status> : <Status>异常</Status>}</TableCell></TableRow>)}</TableBody></Table></div></AccordionContent></AccordionItem>)}</Accordion> : <div className="p-12 text-center"><FileClock className="mx-auto size-8 text-slate-300" /><p className="mt-3 text-sm font-medium">{search ? '没有符合条件的历史记录' : '还没有保存的账单记录'}</p><p className="mt-1 text-xs text-muted-foreground">完成一次批量核算后会自动出现在这里</p></div>}
     </section>
   </>;
 }
@@ -804,13 +861,18 @@ function parseBindingTemplate(grid: unknown[][], quoteNames: string[]): Binding[
   const normalizedHeaders = headers.map(normalizeHeader);
   const quoteIndex = normalizedHeaders.findIndex((header) => /^(所用报价|报价名称|报价方案)$/.test(header));
   const prepaidIndex = normalizedHeaders.findIndex((header) => /^预付面单费(?:\(元\))?$/.test(header));
+  const priorityIndex = normalizedHeaders.findIndex((header) => /^(报价优先级|优先级)$/.test(header));
+  const strategyIndex = normalizedHeaders.findIndex((header) => /^(选价策略|选择策略)$/.test(header));
+  const enabledIndex = normalizedHeaders.findIndex((header) => /^(是否启用|启用)$/.test(header));
   if (quoteIndex < 0 || prepaidIndex < 0) throw new Error('模板必须包含“所用报价/报价名称”和“预付面单费”两列');
   const matchKeyIndex = normalizedHeaders.findIndex((header) => /^(结算条件组合值|组合匹配值|结算组合值)$/.test(header));
-  const legacyConditionIndexes = headers.map((header, index) => ({ header, index })).filter((item) => item.header && item.index !== quoteIndex && item.index !== prepaidIndex);
+  const reservedIndexes = new Set([quoteIndex, prepaidIndex, priorityIndex, strategyIndex, enabledIndex].filter((index) => index >= 0));
+  const legacyConditionIndexes = headers.map((header, index) => ({ header, index })).filter((item) => item.header && !reservedIndexes.has(item.index));
   if (matchKeyIndex < 0 && !legacyConditionIndexes.length) throw new Error('模板必须包含“结算条件组合值”列');
   const rows = grid.slice(1).filter((row) => row.some((cell) => cellText(cell)));
   if (!rows.length) throw new Error('模板中没有可导入的结算关系');
   const combinations = new Set<string>();
+  const strategies = new Map<string, QuoteSelectionStrategy>();
   return rows.map((row, index) => {
     const rowNumber = index + 2;
     const legacyValues = legacyConditionIndexes.map(({ index: column }) => cellText(row[column]));
@@ -821,16 +883,45 @@ function parseBindingTemplate(grid: unknown[][], quoteNames: string[]): Binding[
     const matchedQuote = quoteNames.find((name) => quoteNamesMatch(requestedQuote, name));
     if (!requestedQuote || !matchedQuote) throw new Error(`第 ${rowNumber} 行报价“${requestedQuote || '空白'}”未在报价管理中导入`);
     const combinationKey = normalizeMatchValue(matchKey);
-    if (combinations.has(combinationKey)) throw new Error(`第 ${rowNumber} 行匹配条件组合重复`);
-    combinations.add(combinationKey);
+    const candidateKey = `${combinationKey}::${normalizeMatchValue(matchedQuote)}`;
+    if (combinations.has(candidateKey)) throw new Error(`第 ${rowNumber} 行“${matchKey} + ${matchedQuote}”候选配置重复`);
+    combinations.add(candidateKey);
     const prepaid = Number(row[prepaidIndex]);
     if (!Number.isFinite(prepaid) || prepaid < 0) throw new Error(`第 ${rowNumber} 行预付面单费必须是大于或等于 0 的数字`);
-    return { id: crypto.randomUUID(), customer: '', store: '', quote: matchedQuote, prepaid, matchKey };
+    const priority = priorityIndex >= 0 && cellText(row[priorityIndex]) ? Number(row[priorityIndex]) : 1;
+    if (!Number.isFinite(priority) || priority < 1) throw new Error(`第 ${rowNumber} 行报价优先级必须是大于或等于 1 的数字`);
+    const strategy = parseSelectionStrategy(strategyIndex >= 0 ? cellText(row[strategyIndex]) : '');
+    const existingStrategy = strategies.get(combinationKey);
+    if (existingStrategy && existingStrategy !== strategy) throw new Error(`第 ${rowNumber} 行同一组合值必须使用相同选价策略`);
+    strategies.set(combinationKey, strategy);
+    const enabledText = enabledIndex >= 0 ? cellText(row[enabledIndex]).toLowerCase() : '';
+    const enabled = !['否', '停用', 'false', '0', 'no'].includes(enabledText);
+    return { id: crypto.randomUUID(), customer: '', store: '', quote: matchedQuote, prepaid, matchKey, priority, strategy, enabled };
   });
 }
 
+function parseSelectionStrategy(value: string): QuoteSelectionStrategy {
+  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!normalized || /固定|优先|priority/.test(normalized)) return 'priority';
+  if (/最低合计|最低总价|lowesttotal/.test(normalized)) return 'lowest_total';
+  if (/最低基础|lowestbase/.test(normalized)) return 'lowest_base';
+  throw new Error(`无法识别选价策略“${value}”，请填写固定优先级、最低合计或最低基础费`);
+}
+
+function strategyLabel(strategy: QuoteSelectionStrategy) {
+  return strategy === 'lowest_total' ? '最低合计' : strategy === 'lowest_base' ? '最低基础费' : '固定优先级';
+}
+
 function migrateBinding(binding: Binding): Binding {
-  return { ...binding, matchKey: getBindingKey(binding) };
+  return { ...binding, matchKey: getBindingKey(binding), priority: bindingPriority(binding), strategy: binding.strategy ?? 'priority', enabled: binding.enabled !== false };
+}
+
+function bindingEnabled(binding: Binding) {
+  return binding.enabled !== false;
+}
+
+function bindingPriority(binding: Binding) {
+  return Number.isFinite(binding.priority) && Number(binding.priority) > 0 ? Number(binding.priority) : 1;
 }
 
 function getBindingConditions(binding: Binding): Record<string, string> {
@@ -866,23 +957,22 @@ function settlementKeysEqual(left: string, right: string) {
   return normalizeMatchValue(left) === normalizeMatchValue(right);
 }
 
-function resolveBinding(bindings: Binding[], settlementKey: string) {
-  if (!bindings.length) return { binding: undefined, error: '' };
+function resolveBindings(bindings: Binding[], settlementKey: string) {
+  if (!bindings.length) return { bindings: [] as Binding[], error: '' };
   const cleanedKey = cleanSettlementKey(settlementKey);
-  if (!cleanedKey || cleanedKey.split('+').some((part) => !part)) return { binding: undefined, error: `结算条件组合值包含空白项；收到：${cleanedKey || '未提供'}` };
-  const matches = bindings.filter((binding) => settlementKeysEqual(getBindingKey(binding), cleanedKey));
-  if (!matches.length) return { binding: undefined, error: `没有命中任何结算关系；收到组合值：${cleanedKey}` };
-  if (matches.length > 1) return { binding: undefined, error: `组合值“${cleanedKey}”同时命中 ${matches.length} 条关系，请删除重复规则` };
-  return { binding: matches[0], error: '' };
+  if (!cleanedKey || cleanedKey.split('+').some((part) => !part)) return { bindings: [] as Binding[], error: `结算条件组合值包含空白项；收到：${cleanedKey || '未提供'}` };
+  const matches = bindings.filter((binding) => bindingEnabled(binding) && settlementKeysEqual(getBindingKey(binding), cleanedKey));
+  if (!matches.length) return { bindings: [] as Binding[], error: `没有命中任何已启用的结算关系；收到组合值：${cleanedKey}` };
+  const duplicateQuote = matches.find((binding, index) => matches.findIndex((item) => quoteNamesMatch(item.quote, binding.quote)) !== index);
+  if (duplicateQuote) return { bindings: [] as Binding[], error: `组合值“${cleanedKey}”重复配置了报价“${duplicateQuote.quote}”` };
+  const strategies = new Set(matches.map((binding) => binding.strategy ?? 'priority'));
+  if (strategies.size > 1) return { bindings: [] as Binding[], error: `组合值“${cleanedKey}”的候选报价使用了不同选价策略，请统一配置` };
+  return { bindings: [...matches].sort((left, right) => bindingPriority(left) - bindingPriority(right) || left.quote.localeCompare(right.quote, 'zh-CN')), error: '' };
 }
 
 function legacySettlementKey(row: ShipmentInput) {
   if (row.matchFields && Object.keys(row.matchFields).length) return combineSettlementValues(Object.values(row.matchFields));
   return combineSettlementValues([row.customer ?? '', row.store ?? ''].filter(Boolean));
-}
-
-function formatBindingConditions(binding: Binding) {
-  return getBindingKey(binding);
 }
 
 function findWorkbookQuote(quotes: ImportedWorkbookQuote[], requested: string) {
@@ -912,21 +1002,21 @@ function downloadJson(name: string, value: unknown) {
 
 function exportResultsCsv(name: string, results: FeeResult[], relationProfileName?: string) {
   const surchargeNames = [...new Set(results.flatMap((row) => Object.keys(row.surchargeDetails ?? {})))];
-  const headers = ['原表行号', '运单号', '目的地', '重量kg', '计费重量kg', '结算条件组合值', '结算&报价关系表', '物流公司/报价条件', '日期', '账单报价方案', '实际使用报价', '基础费用', ...surchargeNames, '附加费合计', '面单抵扣', '合计运费', '状态', '计算说明'];
-  const data = results.map((row) => [row.sourceRow ?? '', row.trackingNo, row.destination, row.weight, row.roundedWeight, row.settlementKey ?? '', relationProfileName ?? '', row.rateCondition ?? '', row.date ?? '', row.quotePlan ?? '', row.quoteName, row.baseFee, ...surchargeNames.map((surchargeName) => row.surchargeDetails?.[surchargeName] ?? 0), row.surcharge, row.prepaid, row.total, row.status === 'ok' ? '成功' : '异常', row.explanation]);
+  const headers = ['原表行号', '运单号', '目的地', '重量kg', '计费重量kg', '结算条件组合值', '结算&报价关系表', '物流公司/报价条件', '日期', '账单报价方案', '候选报价', '选价策略', '选价说明', '实际使用报价', '基础费用', ...surchargeNames, '附加费合计', '面单抵扣', '合计运费', '状态', '计算说明'];
+  const data = results.map((row) => [row.sourceRow ?? '', row.trackingNo, row.destination, row.weight, row.roundedWeight, row.settlementKey ?? '', relationProfileName ?? '', row.rateCondition ?? '', row.date ?? '', row.quotePlan ?? '', row.candidateQuotes?.join(' / ') ?? '', row.selectionStrategy ? strategyLabel(row.selectionStrategy) : '', row.selectionReason ?? '', row.quoteName, row.baseFee, ...surchargeNames.map((surchargeName) => row.surchargeDetails?.[surchargeName] ?? 0), row.surcharge, row.prepaid, row.total, row.status === 'ok' ? '成功' : '异常', row.explanation]);
   downloadCsv(name, [headers, ...data]);
 }
 
 function exportOriginalWithResultsCsv(name: string, originalGrid: unknown[][], headerRow: number, results: FeeResult[], relationProfileName?: string) {
   const surchargeNames = [...new Set(results.flatMap((row) => Object.keys(row.surchargeDetails ?? {})))];
-  const appendedHeaders = ['核算_结算&报价关系表', '核算_实际使用报价', '核算_计费重量kg', '核算_基础费用', ...surchargeNames.map((item) => `核算_${item}`), '核算_附加费合计', '核算_面单抵扣', '核算_合计运费', '核算_状态', '核算_计算说明'];
+  const appendedHeaders = ['核算_结算&报价关系表', '核算_候选报价', '核算_选价策略', '核算_选价说明', '核算_实际使用报价', '核算_计费重量kg', '核算_基础费用', ...surchargeNames.map((item) => `核算_${item}`), '核算_附加费合计', '核算_面单抵扣', '核算_合计运费', '核算_状态', '核算_计算说明'];
   const resultBySourceRow = new Map(results.map((row) => [row.sourceRow, row]));
   const blankAppend = appendedHeaders.map(() => '');
   const rows = originalGrid.map((row, index) => {
     if (index === headerRow) return [...row, ...appendedHeaders];
     const result = resultBySourceRow.get(index + 1);
     if (!result) return [...row, ...blankAppend];
-    return [...row, relationProfileName ?? '', result.quoteName, result.roundedWeight, result.baseFee, ...surchargeNames.map((surchargeName) => result.surchargeDetails?.[surchargeName] ?? 0), result.surcharge, result.prepaid, result.total, result.status === 'ok' ? '成功' : '异常', result.explanation];
+    return [...row, relationProfileName ?? '', result.candidateQuotes?.join(' / ') ?? '', result.selectionStrategy ? strategyLabel(result.selectionStrategy) : '', result.selectionReason ?? '', result.quoteName, result.roundedWeight, result.baseFee, ...surchargeNames.map((surchargeName) => result.surchargeDetails?.[surchargeName] ?? 0), result.surcharge, result.prepaid, result.total, result.status === 'ok' ? '成功' : '异常', result.explanation];
   });
   downloadCsv(name, rows);
 }

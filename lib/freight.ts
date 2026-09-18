@@ -42,6 +42,9 @@ export type FeeResult = ShipmentInput & {
   prepaid: number;
   total: number;
   quoteName: string;
+  selectionStrategy?: 'priority' | 'lowest_total' | 'lowest_base';
+  selectionReason?: string;
+  candidateQuotes?: string[];
   status: 'ok' | 'error';
   explanation: string;
 };
